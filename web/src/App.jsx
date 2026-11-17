@@ -4,15 +4,27 @@ import { Icons } from "./components/Icons.jsx";
 import Create from "./pages/Create.jsx";
 import Library from "./pages/Library.jsx";
 import Settings from "./pages/Settings.jsx";
+import OneClickAI from "./pages/OneClickAI.jsx";
+import AutoAgent from "./pages/AutoAgent.jsx";
+import PublishingQueue from "./pages/PublishingQueue.jsx";
+import YouTubeDashboard from "./pages/YouTubeDashboard.jsx";
 
 const NAV = [
-  { id: "create", label: "Create", icon: Icons.create },
+  { id: "oneclick", label: "One-Click AI", icon: Icons.bolt || Icons.create },
+  { id: "create", label: "Manual Wizard", icon: Icons.create },
+  { id: "agent", label: "Auto Agent", icon: Icons.settings },
+  { id: "queue", label: "Publish Queue", icon: Icons.library },
+  { id: "channels", label: "Channels", icon: Icons.library },
   { id: "library", label: "Library", icon: Icons.library },
   { id: "settings", label: "Settings", icon: Icons.settings },
 ];
 
 const TITLES = {
-  create: { h: "Create clips", sub: "Turn any video into captioned vertical shorts" },
+  oneclick: { h: "One-Click AI", sub: "Mode A: Instant hook discovery, auto-reframing & clipping" },
+  create: { h: "Create clips", sub: "7-step manual studio for custom captions, fonts & timing" },
+  agent: { h: "Auto Agent", sub: "Mode B: Autonomous YouTube channel watcher & watched-folder matcher" },
+  queue: { h: "Publishing Queue", sub: "Review AI scores, fine-tune titles & approve YouTube uploads" },
+  channels: { h: "YouTube Channels", sub: "Google OAuth 2.0 connection & daily API quota telemetry" },
   library: { h: "Library", sub: "Every clip you've generated" },
   settings: { h: "Settings", sub: "Compute device & environment" },
 };
@@ -189,7 +201,11 @@ export default function App() {
             <span className="orb orb-4" />
             <span className="orb orb-5" />
           </div>
+          {page === "oneclick" && <OneClickAI />}
           {page === "create" && <Create key="create" step={step} setStep={setStep} />}
+          {page === "agent" && <AutoAgent />}
+          {page === "queue" && <PublishingQueue />}
+          {page === "channels" && <YouTubeDashboard />}
           {page === "library" && <Library />}
           {page === "settings" && <Settings />}
         </div>

@@ -2,6 +2,7 @@
 downloads/
 transcripts/
 clips/
+watched/
 
 # Large archives
 *.zip
@@ -19,6 +20,7 @@ __pycache__/
 .venv/
 venv/
 env/
+.pytest_cache/
 
 # Model cache (faster-whisper / huggingface)
 *.bin
@@ -26,3 +28,15 @@ env/
 
 # Runtime logs
 *.log
+
+# Sensitive credentials & local database
+data/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+client_secrets*.json
+oauth_state*.json
+.env
+.env.*
+

@@ -24,6 +24,11 @@ MUSIC_DIR = ASSETS_DIR / "music"
 STATIC_DIR = ROOT_DIR / "static"
 # Built React dashboard (web/dist) — served as the primary frontend when present.
 WEB_DIST_DIR = ROOT_DIR / "web" / "dist"
+# Persistent SQLite database and local cache directory.
+DATA_DIR = ROOT_DIR / "data"
+DB_PATH = DATA_DIR / "clipforge.db"
+# Watched folder for autonomous Mode B media acquisition.
+WATCHED_DIR = ROOT_DIR / "watched"
 
 
 def ensure_dirs() -> None:
@@ -37,6 +42,8 @@ def ensure_dirs() -> None:
         MASKS_DIR,
         MUSIC_DIR,
         STATIC_DIR,
+        DATA_DIR,
+        WATCHED_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 

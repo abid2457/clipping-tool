@@ -58,44 +58,12 @@ def select_clips(
 ) -> List[dict]:
     """Return up to `num_clips` non-overlapping {start, end, title} windows.
 
-    If ``clip_length`` is given (seconds — e.g. 30 / 45 / 60 / custom), each window
-    is cut to EXACTLY that duration (30s means 30s, not "≈38s to finish a
-    sentence"); ``num_clips`` only caps the count.
-
-    Otherwise the clip length ADAPTS to how many clips were asked for: a few clips
-    → longer (~ideal) windows; many clips → shorter windows so the video can
-    actually yield that many. (You can only fit ~duration / clip-length clips.)
+    Powered by ClipForge v2.0 SmartSelector integrating local Ollama 5-pillar virality
+    scoring with robust sentence-boundary heuristic fallbacks.
     """
-    segments = transcript.get("segments") or []
-    if not segments:
-        return _fallback_even_split(transcript, num_clips, clip_length)
-
-    duration = float(transcript.get("duration") or (segments[-1].get("end") or 0.0))
-
-    if clip_length and clip_length > 0:
-        # Explicit length requested: cut each window to EXACTLY this many seconds so
-        # the clip is the duration the user asked for (no sentence-boundary overshoot).
-        candidates = _build_candidate_windows(segments, float(clip_length),
-                                              exact_len=float(clip_length))
-    else:
-        # Target window length so `num_clips` can fit the video. The ×0.85
-        # compensates for windows overshooting the target while finishing a
-        # sentence, keeping the final count close to what was requested.
-        target = (duration / num_clips) if (num_clips and duration) else IDEAL_CLIP_LEN
-        target = max(10.0, min(MAX_CLIP_LEN, target * 0.85))
-        candidates = _build_candidate_windows(segments, target)
-
-    if not candidates:
-        return _fallback_even_split(transcript, num_clips, clip_length)
-
-    # Optional local Ollama scoring (off unless explicitly enabled and available).
-    if os.environ.get("USE_OLLAMA") == "1" and _ollama_available():
-        try:
-            return _select_with_ollama(candidates, num_clips)
-        except Exception as exc:  # noqa: BLE001 - always degrade to heuristic
-            logger.warning("Ollama selection failed, using heuristic: %s", exc)
-
-    return _select_heuristic(candidates, num_clips)
+    from app.intelligence.smart_selector import SmartSelector
+    selector = SmartSelector()
+    return selector.select_clips(transcript, num_clips, clip_length)
 
 
 # --------------------------------------------------------------------------- #

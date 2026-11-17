@@ -1,13 +1,13 @@
-"""Background job model + in-memory registry for the clip pipeline.
+"""Background job model + SQLite durable state for the clip pipeline.
 
 The full pipeline (download -> transcribe -> select -> render) can take minutes,
 so running it inside the HTTP request would make the browser appear frozen. Each
-request instead creates a :class:`Job`, runs the pipeline on a daemon thread, and
-reports fine-grained progress that the frontend streams live (see the SSE
-endpoint in ``main.py``).
+request creates a :class:`Job`, runs the pipeline on a daemon thread with lease
+heartbeating, and reports fine-grained progress that the frontend streams live
+(see the SSE endpoint in ``main.py``).
 
-Everything is in-memory and single-process - perfect for this local, single-user
-tool. Restarting the server clears jobs (the rendered clips on disk survive).
+In v2.0, jobs are persisted to SQLite so progress, status, and history survive
+server restarts, crashes, and network disconnections.
 """
 
 from __future__ import annotations
@@ -29,13 +29,14 @@ from .models import (
     TranscriptionError,
 )
 from .paths import CLIPS_DIR
+from app.database.session import db_session
+from app.database.repository import Repository
+from app.workers.leases import JobLease
 
 logger = logging.getLogger("ai_video_clipper.jobs")
 
 
-# Overall-progress span (0..1) owned by each stage. The per-stage fraction is
-# mapped into these bands so the single top progress bar advances smoothly across
-# the whole pipeline rather than jumping per stage.
+# Overall-progress span (0..1) owned by each stage.
 _STAGE_SPANS = {
     "queued": (0.0, 0.0),
     "downloading": (0.02, 0.25),
@@ -46,7 +47,6 @@ _STAGE_SPANS = {
     "error": (0.0, 0.0),
 }
 
-# Human labels for the stepper in the UI.
 STAGE_LABELS = {
     "downloading": "Download",
     "transcribing": "Transcribe",
@@ -54,18 +54,11 @@ STAGE_LABELS = {
     "rendering": "Render",
 }
 
-# Characters not allowed in filenames on Windows (and best avoided elsewhere).
 _BAD_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 
 
 def download_filename(title: str, language: Optional[str], index: int) -> str:
-    """Suggested download name for a clip, written in the caption's language.
-
-    Prefixes the language's native name (e.g. "اردو", "हिन्दी", "English") so the
-    file is clearly named in the language its captions are in, then the clip
-    title (already in that language, since it's drawn from the transcript). Falls
-    back to a numbered name when the title is empty. Always ends in ``.mp4``.
-    """
+    """Suggested download name for a clip, written in the caption's language."""
     lang = (language or "").strip().lower()
     native = LANGUAGE_NAMES.get(lang, lang.upper() if lang else "Clip")
     clean_title = _BAD_FILENAME_CHARS.sub(" ", (title or "").strip()).strip()
@@ -78,25 +71,25 @@ def download_filename(title: str, language: Optional[str], index: int) -> str:
 
 
 class Job:
-    """A single pipeline run with thread-safe progress + result state."""
+    """A single pipeline run with thread-safe progress + persistent result state."""
 
-    def __init__(self, req: GenerateRequest) -> None:
-        self.id = uuid.uuid4().hex
+    def __init__(self, req: Optional[GenerateRequest] = None, job_id: Optional[str] = None) -> None:
+        self.id = job_id or uuid.uuid4().hex
         self.req = req
-        self.status = "queued"  # queued | running | done | error
+        self.status = "queued"  # queued | running | done | error | cancelled
         self.stage = "queued"
-        self.stage_progress = 0.0  # 0..1 within the current stage
-        self.progress = 0.0  # 0..1 overall (derived from stage span)
+        self.stage_progress = 0.0  # 0..1 within current stage
+        self.progress = 0.0  # 0..1 overall
         self.message = "Queued..."
         self.clips: List[dict] = []
         self.error: Optional[str] = None
         self.clip_id: Optional[str] = None
         self.cancelled = False
         self._lock = threading.Lock()
-        self._rev = 0  # bumped on every change so the SSE stream only sends diffs
+        self._rev = 0  # bumped on every change for SSE diffs
 
     def cancel(self) -> None:
-        """Flag the run for cancellation; the pipeline stops at the next checkpoint."""
+        """Flag the run for cancellation; pipeline stops at next checkpoint."""
         with self._lock:
             if self.status in ("done", "error"):
                 return
@@ -106,9 +99,10 @@ class Job:
             self.message = "Cancelled."
             self._rev += 1
 
-    # -- mutation ---------------------------------------------------------- #
+        self._sync_db()
+
     def set_stage(self, stage: str, frac: float, message: str) -> None:
-        """Move to/within a stage and recompute the overall progress band."""
+        """Move to/within a stage and recompute overall progress band."""
         frac = min(1.0, max(0.0, frac))
         lo, hi = _STAGE_SPANS.get(stage, (0.0, 0.0))
         with self._lock:
@@ -119,8 +113,10 @@ class Job:
             self.message = message
             self._rev += 1
 
+        self._sync_db()
+
     def add_clip(self, clip: dict) -> None:
-        """Publish a finished clip so the UI can show it before the run ends."""
+        """Publish a finished clip so UI can show it before run ends."""
         with self._lock:
             self.clips.append(clip)
             self._rev += 1
@@ -135,6 +131,8 @@ class Job:
             self.clips = clips
             self._rev += 1
 
+        self._sync_db()
+
     def fail(self, message: str) -> None:
         with self._lock:
             self.status = "error"
@@ -143,9 +141,26 @@ class Job:
             self.message = message
             self._rev += 1
 
-    # -- read -------------------------------------------------------------- #
+        self._sync_db()
+
+    def _sync_db(self) -> None:
+        """Persist current status to SQLite asynchronously/safely."""
+        try:
+            with db_session() as session:
+                repo = Repository(session)
+                db_status = "completed" if self.status == "done" else ("failed" if self.status == "error" else self.status)
+                repo.update_job_progress(
+                    job_id=self.id,
+                    stage=self.stage,
+                    progress=self.progress,
+                    status=db_status,
+                    error_message=self.error,
+                )
+        except Exception:
+            pass
+
     def snapshot(self) -> dict:
-        """Return a JSON-serialisable view of the current state."""
+        """Return a JSON-serialisable view of current state."""
         with self._lock:
             return {
                 "id": self.id,
@@ -172,16 +187,70 @@ def create_job(req: GenerateRequest) -> Job:
     job = Job(req)
     with _JOBS_LOCK:
         _JOBS[job.id] = job
+
+    # Persist in SQLite
+    try:
+        with db_session() as session:
+            repo = Repository(session)
+            src_uri = req.video_url or req.upload_name or "local_source"
+            src_video = repo.get_or_create_source_video(
+                source_uri=src_uri,
+                source_type="upload" if req.upload_id else "url",
+            )
+            repo.create_job(
+                job_id=job.id,
+                source_video_id=src_video.id,
+                stage="queued",
+                status="pending",
+            )
+    except Exception as e:
+        logger.warning("[%s] Failed to record initial job in DB: %s", job.id, e)
+
     return job
 
 
 def get_job(job_id: str) -> Optional[Job]:
     with _JOBS_LOCK:
-        return _JOBS.get(job_id)
+        job = _JOBS.get(job_id)
+        if job:
+            return job
+
+    # Reconstruct from SQLite if missing from memory
+    try:
+        with db_session() as session:
+            repo = Repository(session)
+            db_job = repo.get_job(job_id)
+            if db_job:
+                reconstructed = Job(req=None, job_id=db_job.id)
+                reconstructed.status = "done" if db_job.status == "completed" else db_job.status
+                reconstructed.stage = db_job.stage
+                reconstructed.progress = db_job.progress
+                reconstructed.error = db_job.error_message
+                reconstructed.clip_id = db_job.id
+
+                # Load clips
+                db_clips = repo.get_clips_for_job(job_id)
+                for c in db_clips:
+                    reconstructed.clips.append({
+                        "index": c.clip_index,
+                        "title": c.text or f"Clip {c.clip_index + 1}",
+                        "start": c.start_seconds,
+                        "end": c.end_seconds,
+                        "url": c.output_path or f"/clips/{job_id}/{c.clip_index}.mp4",
+                        "score": c.score,
+                    })
+
+                with _JOBS_LOCK:
+                    _JOBS[job_id] = reconstructed
+                return reconstructed
+    except Exception as e:
+        logger.debug("Failed restoring job %s from DB: %s", job_id, e)
+
+    return None
 
 
 def start_job(job: Job) -> None:
-    """Run the pipeline for `job` on a background daemon thread."""
+    """Run pipeline on background daemon thread with durable lease."""
     thread = threading.Thread(target=_run_pipeline, args=(job,), daemon=True)
     thread.start()
 
@@ -190,15 +259,17 @@ def start_job(job: Job) -> None:
 # Pipeline runner
 # --------------------------------------------------------------------------- #
 def _run_pipeline(job: Job) -> None:
-    """download -> transcribe -> select -> render, updating `job` throughout."""
+    """download -> transcribe -> select -> render, updating `job` and DB throughout."""
     req = job.req
+    if not req:
+        return
+
     logger.info("[%s] starting pipeline: %s", job.id, req.model_dump())
+    lease = JobLease(job_id=job.id)
+    lease.start()
 
     try:
-        # 1) Get the source video. Order of preference:
-        #    a) a file already fetched in the background (prefetch) — instant reuse,
-        #    b) a previously uploaded file,
-        #    c) a fresh URL download.
+        # 1) Get source video
         source_mp4 = None
 
         if req.download_id:
@@ -206,12 +277,7 @@ def _run_pipeline(job: Job) -> None:
                 source_mp4 = uploads.resolve_upload(req.download_id)
                 job.set_stage("downloading", 1.0, "Video already downloaded. Preparing...")
             except InvalidVideoURLError:
-                # Prefetched file vanished — fall back to a normal download below.
-                logger.warning(
-                    "[%s] prefetched file %s missing; re-downloading.",
-                    job.id,
-                    req.download_id,
-                )
+                logger.warning("[%s] prefetched file %s missing; re-downloading.", job.id, req.download_id)
 
         if source_mp4 is None and req.upload_id:
             job.set_stage("downloading", 0.2, "Loading uploaded video...")
@@ -237,16 +303,14 @@ def _run_pipeline(job: Job) -> None:
 
             source_mp4 = downloader.download_video(req.video_url, progress_hook=on_download)
 
-        # 2) Transcribe locally (word timestamps) on the requested device. The
-        # transcript is keyed by the source file id (its stem), so a transcript
-        # prepared in the background (pre-transcription, while the user was still
-        # adjusting settings) is reused here and this stage finishes instantly.
+        # 2) Transcribe locally
         clip_id = uuid.uuid4().hex
         job.clip_id = clip_id
         source_id = source_mp4.stem
         device_label = {"auto": "Auto", "cuda": "GPU", "cpu": "CPU"}.get(
             req.device.value, "Auto"
         )
+
         def on_transcribe(frac: float, msg: str) -> None:
             job.set_stage("transcribing", frac, msg)
 
@@ -255,11 +319,6 @@ def _run_pipeline(job: Job) -> None:
                 "transcribing", 1.0, "Using transcript prepared while you set things up..."
             )
         else:
-            # A background pre-transcription (started on Step 2) may already be
-            # running and holding the shared Whisper lock. Rather than freeze the
-            # bar while we block on that lock, mirror the background job's live
-            # progress here so the user sees real movement; once it finishes,
-            # get_or_transcribe returns its cached result instantly.
             running = pretranscribe.find_running(source_id)
             if running is not None:
                 while True:
@@ -282,14 +341,13 @@ def _run_pipeline(job: Job) -> None:
             source_mp4, source_id, req.device.value,
             progress=on_transcribe, language=req.language,
         )
-        # The language the captions are actually in: what the user forced, or
-        # what Whisper detected. Drives the per-clip download filename.
+
         forced = (req.language or "").strip().lower()
         caption_language = (
             forced if forced and forced != "auto" else transcript.get("language")
         )
 
-        # 3) Select clips (local heuristic, optional local Ollama).
+        # 3) Select clips
         job.set_stage("selecting", 0.3, "Analyzing transcript for the best moments...")
         windows = selector.select_clips(transcript, req.num_clips, req.clip_length)
         if not windows:
@@ -299,14 +357,12 @@ def _run_pipeline(job: Job) -> None:
             )
         job.set_stage("selecting", 1.0, f"Found {len(windows)} clip(s) to render.")
 
-        # 4) Per clip: build ASS captions + render with ffmpeg. The caption canvas
-        # must match the actual output frame (1:1 in square mode, aspect otherwise).
+        # 4) Per clip: build ASS captions + render with ffmpeg
         words = transcript.get("words") or []
         caption_overrides = (
             req.caption_overrides.model_dump() if req.caption_overrides else None
         )
         cinematic = req.cinematic.model_dump() if req.cinematic else None
-        # Resolve the background-music track once (None if unset / missing).
         music_path = None
         if req.music_track:
             try:
@@ -362,7 +418,6 @@ def _run_pipeline(job: Job) -> None:
             )
             generate_clip(source_mp4, start, end, opts)
 
-            # So "Reframe" can later re-render just this one clip (see reframe.py).
             reframe.save_recipe(
                 clip_id, index, source_mp4=source_mp4, start=start, end=end,
                 opts_kwargs={
@@ -393,19 +448,18 @@ def _run_pipeline(job: Job) -> None:
                 "filename": download_filename(title, caption_language, index),
             }
             results.append(clip)
-            job.add_clip(clip)  # stream the finished clip to the UI immediately
+            job.add_clip(clip)
 
         job.finish(results)
         logger.info("[%s] pipeline complete: %d clips", job.id, len(results))
 
-        # Persist to history so the History panel survives restarts. Use a
-        # meaningful label: the uploaded file's name, or the source URL.
         if req.upload_id:
             source_label = req.upload_name or "Uploaded file"
             source_type = "upload"
         else:
             source_label = req.video_url or "Unknown source"
             source_type = "url"
+
         try:
             history.add_entry(
                 clip_id=clip_id,
@@ -420,7 +474,7 @@ def _run_pipeline(job: Job) -> None:
                 },
                 clips=results,
             )
-        except Exception:  # noqa: BLE001 - history is best-effort, never fail the job
+        except Exception:
             logger.warning("[%s] could not write history entry", job.id, exc_info=True)
 
     except InvalidVideoURLError as exc:
@@ -432,6 +486,8 @@ def _run_pipeline(job: Job) -> None:
     except ClipGenerationError as exc:
         logger.warning("[%s] render error: %s", job.id, exc)
         job.fail(str(exc))
-    except Exception as exc:  # noqa: BLE001 - never let a thread die silently
+    except Exception as exc:
         logger.exception("[%s] unexpected pipeline failure", job.id)
         job.fail(f"Unexpected error: {exc}")
+    finally:
+        lease.stop()

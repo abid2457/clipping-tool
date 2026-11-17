@@ -397,11 +397,8 @@ def _music_audio_graph(mus_idx: int, volume: float, duck: float = 70.0) -> str:
     )
 
 
-# Shared output-encoding args (everything after the filter graph).
-_ENCODE_ARGS = [
-    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-    "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-]
+from app.rendering.hardware import get_video_encode_args
+from app.vision.auto_reframe import generate_auto_keyframes
 
 
 def generate_clip(source_mp4: Path, start: float, end: float, opts: ClipOptions) -> Path:
@@ -415,8 +412,19 @@ def generate_clip(source_mp4: Path, start: float, end: float, opts: ClipOptions)
     out_dir = (CLIPS_DIR / opts.clip_id).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{opts.index}.mp4"
+    part_path = out_dir / f"{opts.index}.part.mp4"
 
     src = str(Path(source_mp4).resolve())
+
+    # Smart Auto-Reframing: if no manual keyframes were provided for vertical crop,
+    # run face detection to generate dynamic keyframes.
+    if opts.reframe is None and opts.aspect_ratio == AspectRatio.VERTICAL_9_16 and opts.fit_mode == FitMode.CROP:
+        try:
+            auto_kfs = generate_auto_keyframes(source_mp4, start, end, opts.aspect_ratio.value)
+            if auto_kfs:
+                opts.reframe = auto_kfs
+        except Exception as e:
+            logger.debug("Auto-reframe skipped: %s", e)
 
     has_music = opts.music_path is not None and Path(opts.music_path).is_file()
 
@@ -447,15 +455,17 @@ def generate_clip(source_mp4: Path, start: float, end: float, opts: ClipOptions)
     else:
         audio_map = ["-map", "0:a?"]
 
+    encode_args = get_video_encode_args()
+
     cmd = [
         "ffmpeg", "-y",
         *inputs,
         "-t", f"{duration:.3f}",
         "-filter_complex", fc,
         "-map", "[outv]", *audio_map,
-        *_ENCODE_ARGS,
+        *encode_args,
         *tail,
-        str(out_path),
+        str(part_path),
     ]
 
     logger.info("Rendering clip %d (cwd=%s): %s", opts.index, out_dir, " ".join(cmd))
@@ -469,20 +479,31 @@ def generate_clip(source_mp4: Path, start: float, end: float, opts: ClipOptions)
             text=True,
             encoding="utf-8",
             errors="replace",
+            timeout=600,
         )
     except FileNotFoundError as exc:
         raise ClipGenerationError(
             "ffmpeg was not found on PATH. Install it (winget/brew/apt) — it "
             "does the cutting, reframing, and caption burning."
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        if part_path.exists():
+            part_path.unlink(missing_ok=True)
+        raise ClipGenerationError("FFmpeg rendering timed out after 10 minutes.") from exc
     except Exception as exc:  # noqa: BLE001
         raise ClipGenerationError(f"Failed to run ffmpeg: {exc}") from exc
 
-    if proc.returncode != 0 or not out_path.exists():
-        # Surface the tail of ffmpeg's stderr — it usually pinpoints the problem.
+    if proc.returncode != 0 or not part_path.exists():
+        if part_path.exists():
+            part_path.unlink(missing_ok=True)
         tail = (proc.stderr or "").strip().splitlines()[-12:]
         raise ClipGenerationError(
             "ffmpeg failed to render the clip:\n" + "\n".join(tail)
         )
+
+    # Atomic finalization
+    if out_path.exists():
+        out_path.unlink(missing_ok=True)
+    part_path.rename(out_path)
 
     return out_path

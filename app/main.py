@@ -104,17 +104,35 @@ async def lifespan(app: FastAPI):
     connection.
     """
     ensure_dirs()
+    from app.database.session import init_db
+    from app.workers.recovery import run_startup_recovery
+    from app.agent.scheduler import start_scheduler, stop_scheduler
+    init_db()
+    run_startup_recovery()
+    start_scheduler()
     fonts.ensure_fonts()
     threading.Thread(target=_load_model_background, daemon=True).start()
     yield
+    stop_scheduler()
 
 
-app = FastAPI(title="Local AI Video Clipper", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="ClipForge v2.0 - Local AI Video Clipper", version="2.0.0", lifespan=lifespan)
 
-# Permissive CORS for local development (frontend served from the same origin).
+# Restrict CORS to localhost origins for security hardening.
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:8000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -402,6 +420,88 @@ def reframe_clip(clip_id: str, index: int, req: ReframeRequest) -> dict:
     return {"status": "ok", "url": f"/clips/{clip_id}/{index}.mp4?v={uuid.uuid4().hex[:8]}"}
 
 
+@app.get("/api/clip/{clip_id}/{index}/subtitles")
+def get_clip_subtitles(clip_id: str, index: int, format: str = "srt"):
+    """Export the clip's subtitles in SRT, VTT, ASS, or plain TXT format."""
+    fmt = format.lower().strip()
+    if fmt not in ("srt", "vtt", "ass", "txt"):
+        raise HTTPException(status_code=400, detail="Supported formats: srt, vtt, ass, txt")
+
+    ass_path = CLIPS_DIR / clip_id / f"{index}.ass"
+    if not ass_path.exists():
+        raise HTTPException(status_code=404, detail="Subtitles not found for this clip.")
+
+    if fmt == "ass":
+        return FileResponse(
+            str(ass_path),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="clip_{index}.ass"'},
+        )
+
+    from app.rendering.subtitles import format_srt, format_vtt, format_txt
+    import re
+    from fastapi.responses import Response
+
+    dialogues = []
+    lines = ass_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for line in lines:
+        if line.startswith("Dialogue:"):
+            parts = line.split(",", 9)
+            if len(parts) >= 10:
+                clean_text = re.sub(r"\{.*?\}", "", parts[9]).strip()
+                s_parts = parts[1].strip().split(":")
+                e_parts = parts[2].strip().split(":")
+                try:
+                    s_sec = int(s_parts[0]) * 3600 + int(s_parts[1]) * 60 + float(s_parts[2])
+                    e_sec = int(e_parts[0]) * 3600 + int(e_parts[1]) * 60 + float(e_parts[2])
+                    dialogues.append({"start": s_sec, "end": e_sec, "word": clean_text})
+                except Exception:
+                    pass
+
+    if fmt == "srt":
+        content = format_srt(dialogues)
+        media_type = "text/plain; charset=utf-8"
+        ext = "srt"
+    elif fmt == "vtt":
+        content = format_vtt(dialogues)
+        media_type = "text/vtt; charset=utf-8"
+        ext = "vtt"
+    else:
+        content = format_txt(dialogues)
+        media_type = "text/plain; charset=utf-8"
+        ext = "txt"
+
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="clip_{index}.{ext}"'},
+    )
+
+
+class TranscriptUpdateRequest(BaseModel):
+    words: list[dict] = Field(default_factory=list)
+    segments: Optional[list[dict]] = None
+
+
+@app.put("/api/job/{job_id}/transcript")
+def update_transcript(job_id: str, req: TranscriptUpdateRequest) -> dict:
+    """Update corrected words or segments for an active or completed job."""
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    try:
+        from app.database.session import db_session
+        from app.database.repository import Repository
+        with db_session() as session:
+            repo = Repository(session)
+            repo.record_event(job_id, "transcript_edited", {"word_count": len(req.words)})
+    except Exception:
+        pass
+
+    return {"status": "ok", "message": f"Updated transcript with {len(req.words)} words."}
+
+
 @app.post("/api/reveal")
 def reveal_clip(ref: ClipRef) -> dict:
     """Open the clip's folder in the OS file manager with the file selected.
@@ -536,3 +636,607 @@ async def unhandled_exception_handler(request, exc):  # noqa: ANN001
         status_code=500,
         content={"detail": f"Unexpected server error: {exc}"},
     )
+
+
+# --------------------------------------------------------------------------- #
+# ClipForge v2.0 REST API Routes
+# --------------------------------------------------------------------------- #
+from app.youtube import oauth as yt_oauth, quota as yt_quota, uploader as yt_uploader
+from app.agent.metadata_generator import MetadataGenerator
+
+
+@app.get("/api/v2/oauth/url")
+def get_oauth_url(redirect_uri: str = "http://localhost:8000/api/v2/oauth/callback") -> dict:
+    """Generate Google OAuth 2.0 authorization URL for YouTube channel linking."""
+    try:
+        url, state = yt_oauth.get_authorization_url(redirect_uri=redirect_uri)
+        return {"authorization_url": url, "state": state}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/v2/oauth/callback")
+def oauth_callback(
+    code: str,
+    state: Optional[str] = None,
+    redirect_uri: str = "http://localhost:8000/api/v2/oauth/callback",
+):
+    """OAuth callback endpoint handling Google redirect."""
+    from fastapi.responses import HTMLResponse
+    try:
+        result = yt_oauth.exchange_code_for_tokens(code=code, redirect_uri=redirect_uri, state=state)
+        channel_title = result.get("title", "YouTube Channel")
+        html_content = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <title>Channel Connected - ClipForge</title>
+          <style>
+            body {{
+              background: #0f172a;
+              color: #f8fafc;
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              height: 100vh;
+              margin: 0;
+            }}
+            .card {{
+              background: #1e293b;
+              border: 1px solid #334155;
+              padding: 2.5rem 3rem;
+              border-radius: 16px;
+              text-align: center;
+              box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+              max-width: 450px;
+            }}
+            h1 {{ font-size: 1.5rem; margin-bottom: 0.5rem; color: #84cc16; }}
+            p {{ color: #94a3b8; font-size: 0.95rem; line-height: 1.5; }}
+            .channel {{ font-size: 1.1rem; font-weight: 700; color: #fff; margin: 1rem 0; }}
+            .btn {{
+              display: inline-block;
+              background: #84cc16;
+              color: #0f172a;
+              font-weight: 700;
+              padding: 0.75rem 1.5rem;
+              border-radius: 8px;
+              text-decoration: none;
+              margin-top: 1.5rem;
+            }}
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h1>🎉 Channel Connected!</h1>
+            <div class="channel">{channel_title}</div>
+            <p>Your YouTube channel has been authorized and machine-encrypted. Returning to ClipForge...</p>
+            <a class="btn" href="http://localhost:8000">Return to ClipForge</a>
+          </div>
+          <script>
+            setTimeout(function() {{
+              window.location.href = "http://localhost:8000";
+            }}, 2500);
+          </script>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content)
+    except Exception as exc:
+        logger.error("OAuth verification error: %s", exc)
+        err_html = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <title>Authorization Failed - ClipForge</title>
+          <style>
+            body {{
+              background: #0f172a;
+              color: #f8fafc;
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              height: 100vh;
+              margin: 0;
+            }}
+            .card {{
+              background: #1e293b;
+              border: 1px solid #ef4444;
+              padding: 2.5rem 3rem;
+              border-radius: 16px;
+              text-align: center;
+              box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+              max-width: 500px;
+            }}
+            h1 {{ font-size: 1.5rem; margin-bottom: 0.5rem; color: #ef4444; }}
+            p {{ color: #cbd5e1; font-size: 0.95rem; line-height: 1.5; }}
+            .err-box {{ background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; border-radius: 8px; padding: 1rem; color: #fca5a5; font-family: monospace; font-size: 0.85rem; margin: 1.5rem 0; word-break: break-all; }}
+            .btn {{
+              display: inline-block;
+              background: #ef4444;
+              color: #fff;
+              font-weight: 700;
+              padding: 0.75rem 1.5rem;
+              border-radius: 8px;
+              text-decoration: none;
+              margin-top: 0.5rem;
+            }}
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <h1>OAuth Connection Failed</h1>
+            <p>Google could not verify the authorization code. Please try clicking the button below to re-authorize.</p>
+            <div class="err-box">{exc}</div>
+            <a class="btn" href="http://localhost:8000">Return to ClipForge & Retry</a>
+          </div>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=err_html, status_code=400)
+
+
+@app.get("/api/v2/youtube/channels")
+def list_youtube_channels() -> list[dict]:
+    """List all connected YouTube channels."""
+    from app.database.session import db_session
+    from app.database.repository import Repository
+    with db_session() as session:
+        repo = Repository(session)
+        channels = repo.list_channels()
+        return [
+            {
+                "id": ch.id,
+                "youtube_channel_id": ch.youtube_channel_id,
+                "title": ch.title,
+                "status": ch.status,
+                "credential_id": ch.credential_id,
+                "last_checked_at": ch.last_checked_at.isoformat() if ch.last_checked_at else None,
+            }
+            for ch in channels
+        ]
+
+
+@app.get("/api/v2/youtube/quota")
+def get_youtube_quota() -> dict:
+    """Return daily quota usage estimates."""
+    return {
+        "daily_limit": yt_quota.DAILY_QUOTA_LIMIT,
+        "consumed": yt_quota.get_consumed_quota(),
+        "remaining": yt_quota.get_remaining_quota(),
+        "can_upload": yt_quota.can_afford_upload(),
+    }
+
+
+class UploadClipRequest(BaseModel):
+    clip_id: str
+    index: int
+    channel_id: int
+    title: str
+    description: str
+    tags: Optional[list[str]] = None
+    privacy_status: str = "private"
+
+
+@app.post("/api/v2/youtube/upload")
+def upload_clip_to_youtube(req: UploadClipRequest) -> dict:
+    """Upload a generated clip to YouTube with fail-closed privacy safeguards."""
+    clean_job_id = (req.clip_id or "").split("_")[0]
+    clip_file = history.clip_path(clean_job_id, req.index)
+    if not clip_file or not clip_file.exists():
+        clip_file = history.clip_path(req.clip_id, req.index)
+    if not clip_file or not clip_file.exists():
+        raise HTTPException(status_code=404, detail="Clip file not found on disk.")
+
+    from app.database.session import db_session
+    from app.database.repository import Repository
+    from app.database.models import PublishJob, Clip
+    import datetime
+
+    with db_session() as session:
+        repo = Repository(session)
+        ch_list = [c for c in repo.list_channels() if c.id == req.channel_id]
+        if not ch_list:
+            channels = repo.list_channels()
+            if not channels:
+                raise HTTPException(status_code=404, detail="No YouTube channel connected. Connect a channel in the Channels tab first.")
+            channel = channels[0]
+        else:
+            channel = ch_list[0]
+
+        if not channel.credential_id:
+            raise HTTPException(status_code=400, detail="Selected YouTube channel is not authenticated.")
+
+        # Extract scalar values INSIDE the session to avoid detached instance errors
+        cred_id = channel.credential_id
+        channel_id_val = channel.id
+
+    try:
+        uploader = yt_uploader.YouTubeUploader(credential_id=cred_id)
+        result = uploader.upload_clip(
+            video_path=clip_file,
+            title=req.title,
+            description=req.description,
+            tags=req.tags,
+            privacy_status=req.privacy_status,
+        )
+
+        # Update database status
+        with db_session() as session:
+            repo = Repository(session)
+            db_clip_id = req.clip_id if "_" in req.clip_id else f"{req.clip_id}_{req.index}"
+            repo.update_clip_review(db_clip_id, "approved")
+            pub_job = session.query(PublishJob).filter(PublishJob.clip_id == db_clip_id).first()
+            if pub_job:
+                pub_job.status = "published"
+                pub_job.youtube_video_id = result.get("youtube_video_id")
+                pub_job.privacy_status = req.privacy_status
+                pub_job.published_at = datetime.datetime.now(datetime.timezone.utc)
+            else:
+                pub_job = PublishJob(
+                    clip_id=db_clip_id,
+                    channel_id=channel_id_val,
+                    status="published",
+                    privacy_status=req.privacy_status,
+                    youtube_video_id=result.get("youtube_video_id"),
+                    published_at=datetime.datetime.now(datetime.timezone.utc),
+                )
+                session.add(pub_job)
+
+        return {"status": "ok", **result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
+
+
+class GenerateMetadataRequest(BaseModel):
+    transcript: str
+    duration: float = 30.0
+
+
+@app.post("/api/v2/metadata/generate")
+def generate_metadata(req: GenerateMetadataRequest) -> dict:
+    """Generate high-CTR title options, description, and viral hashtags."""
+    generator = MetadataGenerator()
+    return generator.generate_metadata(req.transcript, req.duration)
+
+
+# --------------------------------------------------------------------------- #
+# V2 Enhanced Metadata & Upload with Shorts/Video Mode Support
+# --------------------------------------------------------------------------- #
+
+class GenerateMetadataV2Request(BaseModel):
+    transcript: str
+    duration: float = 30.0
+    upload_mode: str = "shorts"
+    language: Optional[str] = None
+    topic: Optional[str] = None
+
+
+class RegenerateTitlesRequest(BaseModel):
+    transcript: str
+    duration: float = 30.0
+    upload_mode: str = "shorts"
+
+
+class RegenerateDescRequest(BaseModel):
+    transcript: str
+    duration: float = 30.0
+    upload_mode: str = "shorts"
+
+
+class UploadClipRequestV2(BaseModel):
+    clip_id: str
+    index: int
+    channel_id: int
+    title: str
+    description: str
+    tags: Optional[list[str]] = None
+    privacy_status: str = "private"
+    upload_mode: str = "shorts"
+    category_id: str = "22"
+
+
+@app.post("/api/v2/metadata/generate-v2")
+def generate_metadata_v2(req: GenerateMetadataV2Request) -> dict:
+    """Generate mode-aware YouTube Shorts or Video metadata with AI SEO."""
+    generator = MetadataGenerator()
+    return generator.generate_metadata_v2(
+        req.transcript, req.duration, req.upload_mode, req.language, req.topic
+    )
+
+
+@app.post("/api/v2/metadata/regenerate-titles")
+def regenerate_titles(req: RegenerateTitlesRequest) -> dict:
+    """Regenerate only title suggestions for the given mode."""
+    generator = MetadataGenerator()
+    return generator.regenerate_titles(req.transcript, req.duration, req.upload_mode)
+
+
+@app.post("/api/v2/metadata/regenerate-description")
+def regenerate_description(req: RegenerateDescRequest) -> dict:
+    """Regenerate only the description for the given mode."""
+    generator = MetadataGenerator()
+    return generator.regenerate_description(req.transcript, req.duration, req.upload_mode)
+
+
+@app.get("/api/v2/clip/{clip_id}/{index}/info")
+def get_clip_info(clip_id: str, index: int) -> dict:
+    """Get video file metadata (dimensions, duration, codec, Shorts eligibility)."""
+    import subprocess
+    clean_job_id = clip_id.split("_")[0]
+    clip_file = history.clip_path(clean_job_id, index)
+    if not clip_file or not clip_file.exists():
+        clip_file = history.clip_path(clip_id, index)
+    if not clip_file or not clip_file.exists():
+        raise HTTPException(status_code=404, detail="Clip file not found.")
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_format", "-show_streams", str(clip_file),
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        import json as _json
+        probe = _json.loads(result.stdout)
+
+        video_stream = None
+        for s in probe.get("streams", []):
+            if s.get("codec_type") == "video":
+                video_stream = s
+                break
+
+        if not video_stream:
+            raise HTTPException(status_code=422, detail="No video stream found in file.")
+
+        width = int(video_stream.get("width", 0))
+        height = int(video_stream.get("height", 0))
+        duration = float(probe.get("format", {}).get("duration", 0))
+        codec = video_stream.get("codec_name", "unknown")
+        file_size = int(probe.get("format", {}).get("size", 0))
+
+        # Aspect ratio calculation
+        from math import gcd
+        g = gcd(width, height) if width and height else 1
+        aspect_w, aspect_h = width // g, height // g
+        aspect_ratio = f"{aspect_w}:{aspect_h}"
+
+        # Shorts eligibility: vertical aspect (height > width) AND duration <= 180s
+        is_vertical = height > width
+        is_shorts_eligible = is_vertical and duration <= 180
+
+        return {
+            "width": width,
+            "height": height,
+            "duration": round(duration, 1),
+            "codec": codec,
+            "file_size": file_size,
+            "aspect_ratio": aspect_ratio,
+            "is_vertical": is_vertical,
+            "is_shorts_eligible": is_shorts_eligible,
+            "file_path": str(clip_file),
+        }
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="FFprobe timed out.")
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="ffprobe not found. Ensure FFmpeg is installed.")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to probe clip: {exc}")
+
+
+@app.post("/api/v2/youtube/upload-v2")
+def upload_clip_to_youtube_v2(req: UploadClipRequestV2) -> dict:
+    """Upload clip to YouTube with Shorts/Video mode support."""
+    clean_job_id = (req.clip_id or "").split("_")[0]
+    clip_file = history.clip_path(clean_job_id, req.index)
+    if not clip_file or not clip_file.exists():
+        clip_file = history.clip_path(req.clip_id, req.index)
+    if not clip_file or not clip_file.exists():
+        raise HTTPException(status_code=404, detail="Clip file not found on disk.")
+
+    from app.database.session import db_session
+    from app.database.repository import Repository
+    from app.database.models import PublishJob, Clip
+    import datetime
+
+    with db_session() as session:
+        repo = Repository(session)
+        ch_list = [c for c in repo.list_channels() if c.id == req.channel_id]
+        if not ch_list:
+            channels = repo.list_channels()
+            if not channels:
+                raise HTTPException(status_code=404, detail="No YouTube channel connected.")
+            channel = channels[0]
+        else:
+            channel = ch_list[0]
+
+        if not channel.credential_id:
+            raise HTTPException(status_code=400, detail="Channel is not authenticated.")
+        # Extract scalar values INSIDE the session to avoid detached instance errors
+        cred_id = channel.credential_id
+        channel_id_val = channel.id
+
+    try:
+        uploader = yt_uploader.YouTubeUploader(credential_id=cred_id)
+        result = uploader.upload_clip(
+            video_path=clip_file,
+            title=req.title,
+            description=req.description,
+            tags=req.tags,
+            privacy_status=req.privacy_status,
+            upload_mode=req.upload_mode,
+            category_id=req.category_id,
+        )
+
+        with db_session() as session:
+            repo = Repository(session)
+            db_clip_id = req.clip_id if "_" in req.clip_id else f"{req.clip_id}_{req.index}"
+            repo.update_clip_review(db_clip_id, "approved")
+            pub_job = session.query(PublishJob).filter(PublishJob.clip_id == db_clip_id).first()
+            if pub_job:
+                pub_job.status = "published"
+                pub_job.youtube_video_id = result.get("youtube_video_id")
+                pub_job.privacy_status = req.privacy_status
+                pub_job.published_at = datetime.datetime.now(datetime.timezone.utc)
+            else:
+                pub_job = PublishJob(
+                    clip_id=db_clip_id,
+                    channel_id=channel_id_val,
+                    status="published",
+                    privacy_status=req.privacy_status,
+                    youtube_video_id=result.get("youtube_video_id"),
+                    published_at=datetime.datetime.now(datetime.timezone.utc),
+                )
+                session.add(pub_job)
+
+        return {"status": "ok", **result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
+
+
+# --------------------------------------------------------------------------- #
+# Autonomous Agent & Publishing Queue Endpoints
+# --------------------------------------------------------------------------- #
+from app.agent import source_monitor
+from app.database.models import AgentConfig, Clip, PublishJob
+
+
+class AgentConfigSchema(BaseModel):
+    channel_id: Optional[int] = None
+    name: str = "Default Agent"
+    enabled: bool = True
+    mode: str = "manual_approval"  # auto_publish | manual_approval
+    clips_per_video: int = 3
+    min_duration: int = 15
+    max_duration: int = 60
+    caption_preset: str = "hormozi_green"
+    publish_mode: str = "private"
+
+
+@app.get("/api/v2/agent/configs")
+def list_agent_configs() -> list[dict]:
+    """List all configured autonomous agent rules."""
+    from app.database.session import db_session
+    with db_session() as session:
+        configs = session.query(AgentConfig).all()
+        return [
+            {
+                "id": c.id,
+                "channel_id": c.channel_id,
+                "name": c.name,
+                "enabled": c.enabled,
+                "mode": c.mode,
+                "clips_per_video": c.clips_per_video,
+                "min_duration": c.min_duration,
+                "max_duration": c.max_duration,
+                "caption_preset": c.caption_preset,
+                "publish_mode": c.publish_mode,
+            }
+            for c in configs
+        ]
+
+
+@app.post("/api/v2/agent/configs")
+def save_agent_config(cfg: AgentConfigSchema) -> dict:
+    """Create or update an autonomous agent configuration."""
+    from app.database.session import db_session
+    with db_session() as session:
+        obj = AgentConfig(
+            channel_id=cfg.channel_id,
+            name=cfg.name,
+            enabled=cfg.enabled,
+            mode=cfg.mode,
+            clips_per_video=cfg.clips_per_video,
+            min_duration=cfg.min_duration,
+            max_duration=cfg.max_duration,
+            caption_preset=cfg.caption_preset,
+            publish_mode=cfg.publish_mode,
+        )
+        session.add(obj)
+        session.flush()
+        return {"status": "ok", "config_id": obj.id}
+
+
+@app.get("/api/v2/agent/watched-sources")
+def get_watched_sources() -> list[dict]:
+    """Scan and list videos detected in the local watched directory."""
+    return source_monitor.scan_watched_directory()
+
+
+@app.post("/api/v2/agent/scan")
+def trigger_watched_scan() -> dict:
+    """Trigger an immediate scan and reconciliation of watched sources."""
+    count = source_monitor.sync_watched_sources()
+    return {"status": "ok", "new_or_matched_sources": count}
+
+
+@app.get("/api/v2/publishing/queue")
+def get_publishing_queue() -> list[dict]:
+    """List all short-form clips in the publishing review queue."""
+    from app.database.session import db_session
+    with db_session() as session:
+        clips = session.query(Clip).order_by(Clip.created_at.desc()).limit(100).all()
+        results = []
+        for c in clips:
+            meta = json.loads(c.metadata_json or "{}") if c.metadata_json else {}
+            results.append({
+                "clip_id": c.id,
+                "job_id": c.job_id,
+                "index": c.clip_index,
+                "title": c.text,
+                "duration": round(c.duration, 1),
+                "score": c.score,
+                "output_path": c.output_path,
+                "quality_status": c.quality_status,
+                "review_status": c.review_status,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "metadata": meta,
+                "has_publish_job": c.publish_job is not None,
+                "publish_status": c.publish_job.status if c.publish_job else None,
+            })
+        return results
+
+
+@app.post("/api/v2/publishing/{clip_id}/approve")
+def approve_clip(clip_id: str, channel_id: Optional[int] = None, privacy_status: str = "private") -> dict:
+    """Approve a clip for publishing to the connected YouTube channel."""
+    from app.database.session import db_session
+    from app.database.repository import Repository
+    with db_session() as session:
+        repo = Repository(session)
+        clip = repo.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(status_code=404, detail="Clip not found.")
+
+        repo.update_clip_review(clip_id, "approved")
+
+        # Resolve channel
+        ch_id = channel_id
+        if not ch_id:
+            channels = repo.list_channels()
+            if channels:
+                ch_id = channels[0].id
+
+        if ch_id:
+            repo.enqueue_publish_job(clip_id, ch_id, privacy_status=privacy_status)
+
+        return {"status": "ok", "clip_id": clip_id, "review_status": "approved"}
+
+
+@app.post("/api/v2/publishing/{clip_id}/reject")
+def reject_clip(clip_id: str) -> dict:
+    """Reject a clip from publishing."""
+    from app.database.session import db_session
+    from app.database.repository import Repository
+    with db_session() as session:
+        repo = Repository(session)
+        clip = repo.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(status_code=404, detail="Clip not found.")
+
+        repo.update_clip_review(clip_id, "rejected")
+        return {"status": "ok", "clip_id": clip_id, "review_status": "rejected"}

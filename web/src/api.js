@@ -76,6 +76,36 @@ export const api = {
       xhr.onerror = () => reject(new Error("Upload failed — network error."));
       xhr.send(fd);
     }),
+
+  // ClipForge v2.0 API additions
+  getOAuthUrl: () => jget("/api/v2/oauth/url"),
+  youtubeChannels: () => jget("/api/v2/youtube/channels"),
+  youtubeQuota: () => jget("/api/v2/youtube/quota"),
+  uploadToYouTube: (payload) => jpost("/api/v2/youtube/upload", payload),
+  generateMetadata: (transcript, duration) => jpost("/api/v2/metadata/generate", { transcript, duration }),
+  generateMetadataV2: (transcript, duration, upload_mode, language, topic) =>
+    jpost("/api/v2/metadata/generate-v2", { transcript, duration, upload_mode, language, topic }),
+  uploadToYouTubeV2: (payload) => jpost("/api/v2/youtube/upload-v2", payload),
+  regenerateTitles: (transcript, duration, upload_mode) =>
+    jpost("/api/v2/metadata/regenerate-titles", { transcript, duration, upload_mode }),
+  regenerateDesc: (transcript, duration, upload_mode) =>
+    jpost("/api/v2/metadata/regenerate-description", { transcript, duration, upload_mode }),
+  clipInfo: (clipId, index) => jget(`/api/v2/clip/${clipId}/${index}/info`),
+  agentConfigs: () => jget("/api/v2/agent/configs"),
+  saveAgentConfig: (payload) => jpost("/api/v2/agent/configs", payload),
+  watchedSources: () => jget("/api/v2/agent/watched-sources"),
+  scanWatchedSources: () => jpost("/api/v2/agent/scan", {}),
+  publishingQueue: () => jget("/api/v2/publishing/queue"),
+  approveClip: (clipId, channelId, privacyStatus = "private") =>
+    jpost(`/api/v2/publishing/${clipId}/approve?privacy_status=${privacyStatus}` + (channelId ? `&channel_id=${channelId}` : ""), {}),
+  rejectClip: (clipId) => jpost(`/api/v2/publishing/${clipId}/reject`, {}),
+  updateTranscript: (jobId, words) =>
+    fetch(`/api/job/${jobId}/transcript`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ words }),
+    }).then((r) => r.json()),
+  subtitleUrl: (clipId, index, format = "srt") => `/api/clip/${clipId}/${index}/subtitles?format=${format}`,
 };
 
 // Subscribe to a job's Server-Sent Events. Returns a close() fn.
