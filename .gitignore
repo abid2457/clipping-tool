@@ -1,0 +1,28 @@
+# Generated / large artifacts
+downloads/
+transcripts/
+clips/
+
+# Large archives
+*.zip
+
+# Node
+node_modules/
+web/dist/
+
+# Bundled fonts are auto-downloaded on first run
+assets/fonts/*.ttf
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Model cache (faster-whisper / huggingface)
+*.bin
+.cache/
+
+# Runtime logs
+*.log
