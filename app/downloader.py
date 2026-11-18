@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
@@ -29,6 +31,24 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _DEFAULT_BROWSERS = ["chrome", "edge", "brave", "firefox", "opera", "vivaldi"]
 _COOKIE_FILE_ENV = "CLIPFORGE_COOKIES_FILE"       # path to a cookies.txt
 _COOKIE_BROWSER_ENV = "CLIPFORGE_COOKIES_BROWSER"  # force one browser, e.g. "chrome"
+
+# Known cookie DB paths on Windows — used to skip browsers that aren't installed.
+_BROWSER_PATHS: dict[str, list[Path]] = {
+    "chrome":  [Path(os.environ.get("LOCALAPPDATA", ".")) / "Google" / "Chrome" / "User Data"],
+    "edge":    [Path(os.environ.get("LOCALAPPDATA", ".")) / "Microsoft" / "Edge" / "User Data"],
+    "brave":   [Path(os.environ.get("LOCALAPPDATA", ".")) / "BraveSoftware" / "Brave-Browser" / "User Data"],
+    "firefox": [Path(os.environ.get("APPDATA", ".")) / "Mozilla" / "Firefox" / "Profiles"],
+    "opera":   [Path(os.environ.get("APPDATA", ".")) / "Opera Software" / "Opera Stable"],
+    "vivaldi": [Path(os.environ.get("LOCALAPPDATA", ".")) / "Vivaldi" / "User Data"],
+}
+
+
+def _browser_installed(name: str) -> bool:
+    """Return True only if the browser's profile directory actually exists."""
+    for p in _BROWSER_PATHS.get(name, []):
+        if p.exists():
+            return True
+    return False
 
 
 def _needs_cookies(reason: str) -> bool:
@@ -67,7 +87,7 @@ def _download_attempts(base_opts: dict) -> list[tuple[str, dict]]:
       1. explicit cookies (only if the user configured a file/browser),
       2. the plain default pass (fast for public videos),
       3. cookie-free alternate YouTube player clients (dodge the bot wall),
-      4. browser cookies (needs the browser closed on Windows) as a last resort.
+      4. browser cookies (only browsers that are actually installed) as last resort.
     """
     cookie_file = os.environ.get(_COOKIE_FILE_ENV)
     forced = os.environ.get(_COOKIE_BROWSER_ENV)
@@ -89,7 +109,10 @@ def _download_attempts(base_opts: dict) -> list[tuple[str, dict]]:
 
     if not forced:  # auto-try common browsers unless the user pinned one
         for b in _DEFAULT_BROWSERS:
-            attempts.append((f"{b} cookies", {**base_opts, "cookiesfrombrowser": (b,)}))
+            if _browser_installed(b):
+                attempts.append((f"{b} cookies", {**base_opts, "cookiesfrombrowser": (b,)}))
+            else:
+                logger.debug("Skipping %s cookies — not installed", b)
 
     return attempts
 
@@ -180,11 +203,15 @@ def download_video(
         if last_reason:
             msg += f"\nReason: {last_reason}"
         if _needs_cookies(last_reason):
+            installed = [b for b in _DEFAULT_BROWSERS if _browser_installed(b)]
+            browser_hint = installed[0] if installed else "chrome"
             msg += (
-                "\n\nThis video is behind YouTube's sign-in / bot check. Make sure "
-                "you're logged into YouTube in your browser, then close the browser "
-                "and try again. To pin a browser set CLIPFORGE_COOKIES_BROWSER "
-                "(chrome/edge/firefox), or point CLIPFORGE_COOKIES_FILE at a cookies.txt."
+                f"\n\nThis video is behind YouTube's sign-in / bot check. "
+                f"Try closing {browser_hint.title()} completely (all windows), then retry. "
+                f"On Windows, the browser's cookie database is locked while it's running. "
+                f"\n\nInstalled browsers detected: {', '.join(installed) if installed else 'none'}. "
+                f"To pin a specific browser, set CLIPFORGE_COOKIES_BROWSER={browser_hint} "
+                f"or point CLIPFORGE_COOKIES_FILE at a cookies.txt."
             )
         raise InvalidVideoURLError(msg) from last_exc
 
