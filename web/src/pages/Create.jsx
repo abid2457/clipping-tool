@@ -219,32 +219,76 @@ export default function Create({ step, setStep }) {
     setBusy(true); setClips([]); setSnap({ stage: "queued", progress: 0.02, message: "Starting…", status: "running" });
     try {
       const { job_id } = await api.generate(payload);
-      jobRef.current = job_id;
-      closeRef.current = streamProgress(job_id, (sn) => {
-        setSnap(sn);
-        if (sn.clips) setClips(sn.clips);
-        if (sn.clip_id) setClipId(sn.clip_id);
-        if (sn.status === "done" || sn.status === "error" || sn.status === "cancelled") {
-          setBusy(false);
-          if (sn.status === "error") setError(sn.error || sn.message || "Pipeline failed.");
-          closeRef.current && closeRef.current();
-        }
-      }, () => { setBusy(false); setError("Lost connection to the progress stream."); });
+      attachToJob(job_id);
     } catch (e) { setBusy(false); setError(e.message); }
   }
 
+  function attachToJob(jobId) {
+    jobRef.current = jobId;
+    if (closeRef.current) closeRef.current();
+    closeRef.current = streamProgress(jobId, (sn) => {
+      setSnap(sn);
+      if (sn.clips) setClips(sn.clips);
+      if (sn.clip_id) setClipId(sn.clip_id);
+      if (sn.status === "done") {
+        setBusy(false);
+      } else if (sn.status === "error" || sn.status === "cancelled") {
+        setBusy(false);
+        if (sn.status === "error") setError(sn.error || sn.message || "Pipeline failed.");
+      } else if (sn.status === "running" || sn.status === "paused") {
+        setBusy(true);
+      }
+    }, () => {});
+  }
+
   function cancelGenerate() {
-    if (jobRef.current) api.cancel(jobRef.current).catch(() => {});
-    closeRef.current && closeRef.current();
+    if (jobRef.current) api.cancelJob ? api.cancelJob(jobRef.current).catch(() => {}) : api.cancel(jobRef.current).catch(() => {});
+    if (closeRef.current) closeRef.current();
     setBusy(false); setSnap(null); setError("");
     generatedRef.current = false;
   }
 
-  // Screen 6 (Review) — auto-render every clip the instant this screen is entered.
+  function pauseGenerate() {
+    if (jobRef.current) api.pauseJob(jobRef.current).catch(() => {});
+  }
+
+  function resumeGenerate() {
+    if (jobRef.current) api.resumeJob(jobRef.current).catch(() => {});
+  }
+
+  function retryGenerate() {
+    if (jobRef.current) {
+      setBusy(true);
+      setError("");
+      api.retryJob(jobRef.current).then(() => attachToJob(jobRef.current)).catch((e) => setError(e.message));
+    }
+  }
+
+  // Screen 6 (Review) — auto-resume if active job exists, otherwise start generate.
   useEffect(() => {
-    if (step === 6 && !generatedRef.current && !busy && clips.length === 0) {
-      generatedRef.current = true;
-      generate();
+    if (step === 6) {
+      api.activeJob().then((res) => {
+        if (res.has_active_job && res.job) {
+          const j = res.job;
+          attachToJob(j.id);
+          if (j.clips && j.clips.length > 0) setClips(j.clips);
+          if (j.status === "running" || j.status === "paused" || j.status === "queued") {
+            setBusy(true);
+            setSnap(j);
+            generatedRef.current = true;
+            return;
+          }
+        }
+        if (!generatedRef.current && !busy && clips.length === 0) {
+          generatedRef.current = true;
+          generate();
+        }
+      }).catch(() => {
+        if (!generatedRef.current && !busy && clips.length === 0) {
+          generatedRef.current = true;
+          generate();
+        }
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
@@ -346,7 +390,7 @@ export default function Create({ step, setStep }) {
       {step === 6 && (
         <Screen6Review
           busy={busy} snap={snap} clips={clips} error={error}
-          onCancel={cancelGenerate} onOpenReframe={openReframe}
+          onCancel={cancelGenerate} onPause={pauseGenerate} onResume={resumeGenerate} onRetry={retryGenerate} onOpenReframe={openReframe}
           onBack={() => setStep(5)} onNext={() => setStep(7)}
         />
       )}

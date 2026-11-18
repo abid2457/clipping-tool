@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api } from "./api.js";
+import { useEffect, useState, useRef, useCallback } from "react";
+import { api, streamProgress } from "./api.js";
 import { Icons } from "./components/Icons.jsx";
 import logoImg from "./assets/logo.jpg";
 import Create from "./pages/Create.jsx";
@@ -83,6 +83,88 @@ function ThemeSwitch({ theme, setTheme, fixed }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// ActiveJobDock — persistent floating widget that shows active job progress
+// globally, even when user switches between sidebar tabs.
+// ---------------------------------------------------------------------------
+function ActiveJobDock({ job, onPause, onResume, onCancel, onRetry, onNavigate }) {
+  if (!job) return null;
+
+  const st = job.status;
+  const isRunning = st === "running" || st === "queued" || st === "pending";
+  const isPaused = st === "paused";
+  const isDone = st === "done";
+  const isError = st === "error";
+  const isCancelled = st === "cancelled";
+
+  // Auto-hide done/error/cancelled after 15 seconds
+  if (isDone || isError || isCancelled) {
+    // We handle the timeout in the parent — just render it.
+  }
+
+  const pct = job.progress != null ? Math.round(job.progress * 100) : 0;
+
+  const statusLabel = {
+    running: "Processing",
+    paused: "Paused",
+    done: "Complete",
+    error: "Error",
+    cancelled: "Cancelled",
+    queued: "Queued",
+    pending: "Starting",
+  }[st] || st;
+
+  const statusClass = {
+    running: "dock-running",
+    paused: "dock-paused",
+    done: "dock-done",
+    error: "dock-error",
+    cancelled: "dock-cancelled",
+    queued: "dock-running",
+    pending: "dock-running",
+  }[st] || "";
+
+  return (
+    <div className={`active-job-dock ${statusClass}`}>
+      <div className="dock-top">
+        <div className="dock-status-row">
+          <span className={`dock-pulse ${isRunning ? "pulse-active" : ""}`} />
+          <span className="dock-status-label">{statusLabel}</span>
+          <span className="dock-pct">{isRunning || isPaused ? `${pct}%` : ""}</span>
+        </div>
+        <button className="dock-nav-btn" onClick={onNavigate} title="Open in Studio">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+          </svg>
+        </button>
+      </div>
+
+      {(isRunning || isPaused) && (
+        <div className="dock-track">
+          <div className="dock-fill" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+
+      <div className="dock-msg">{job.message || "Video pipeline active"}</div>
+
+      <div className="dock-actions">
+        {isRunning && (
+          <button className="dock-btn dock-btn-pause" onClick={onPause} title="Pause">⏸ Pause</button>
+        )}
+        {isPaused && (
+          <button className="dock-btn dock-btn-resume" onClick={onResume} title="Resume">▶ Resume</button>
+        )}
+        {(isRunning || isPaused) && (
+          <button className="dock-btn dock-btn-cancel" onClick={onCancel} title="Cancel">✕ Cancel</button>
+        )}
+        {isError && (
+          <button className="dock-btn dock-btn-retry" onClick={onRetry} title="Retry from Checkpoint">↻ Retry</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [page, setPage] = useState("create");
   const [step, setStep] = useState(1);
@@ -93,6 +175,80 @@ export default function App() {
     try { return localStorage.getItem("cf-theme") || "dark"; } catch { return "dark"; }
   });
   const [modelStatus, setModelStatus] = useState({ status: "idle", message: "", progress: null });
+
+  // Global active-job state for the floating dock
+  const [dockJob, setDockJob] = useState(null);
+  const dockStreamRef = useRef(null);
+  const dockDismissTimer = useRef(null);
+
+  // Fetch active job on mount + tab-switch + poll interval
+  const pollActiveJob = useCallback(async () => {
+    try {
+      const res = await api.activeJob();
+      if (res.has_active_job && res.job) {
+        setDockJob(res.job);
+        // If running/paused, subscribe to live stream updates
+        const jst = res.job.status;
+        if ((jst === "running" || jst === "paused" || jst === "queued" || jst === "pending") && dockStreamRef.current === null) {
+          dockStreamRef.current = streamProgress(
+            res.job.id,
+            (snap) => {
+              setDockJob((prev) => ({ ...(prev || {}), ...snap }));
+              if (snap.status === "done" || snap.status === "error" || snap.status === "cancelled") {
+                // Auto-dismiss dock after 12 seconds for terminal states
+                clearTimeout(dockDismissTimer.current);
+                dockDismissTimer.current = setTimeout(() => setDockJob(null), 12000);
+              }
+            },
+            () => { /* stream error — will reconnect automatically */ }
+          );
+        }
+      } else {
+        // No active job — only clear if dock is showing a terminal state
+        setDockJob((prev) => {
+          if (!prev) return null;
+          if (prev.status === "running" || prev.status === "paused") return prev; // keep — may be lag
+          return prev; // keep terminal states; they'll auto-dismiss
+        });
+      }
+    } catch { /* backend not up yet */ }
+  }, []);
+
+  useEffect(() => {
+    pollActiveJob();
+    const interval = setInterval(pollActiveJob, 5000);
+    const onVis = () => { if (document.visibilityState === "visible") pollActiveJob(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVis);
+      if (dockStreamRef.current) { dockStreamRef.current(); dockStreamRef.current = null; }
+      clearTimeout(dockDismissTimer.current);
+    };
+  }, [pollActiveJob]);
+
+  const dockPause = async () => { if (dockJob) { try { await api.pauseJob(dockJob.id); pollActiveJob(); } catch {} } };
+  const dockResume = async () => {
+    if (dockJob) {
+      try {
+        await api.resumeJob(dockJob.id);
+        // Re-subscribe
+        if (dockStreamRef.current) { dockStreamRef.current(); dockStreamRef.current = null; }
+        pollActiveJob();
+      } catch {}
+    }
+  };
+  const dockCancel = async () => { if (dockJob) { try { await api.cancelJob(dockJob.id); pollActiveJob(); } catch {} } };
+  const dockRetry = async () => {
+    if (dockJob) {
+      try {
+        await api.retryJob(dockJob.id);
+        if (dockStreamRef.current) { dockStreamRef.current(); dockStreamRef.current = null; }
+        pollActiveJob();
+      } catch {}
+    }
+  };
+  const dockNavigate = () => { setPage("oneclick"); setNavOpen(false); };
 
   // Poll until the whisper model is ready (or fails) — fast while it's
   // loading/downloading, then stops (no need to keep polling afterward).
@@ -219,6 +375,18 @@ export default function App() {
           {page === "settings" && <Settings />}
         </div>
       </div>
+
+      {/* Persistent floating dock — visible on every tab when a job is active */}
+      {dockJob && page !== "oneclick" && (
+        <ActiveJobDock
+          job={dockJob}
+          onPause={dockPause}
+          onResume={dockResume}
+          onCancel={dockCancel}
+          onRetry={dockRetry}
+          onNavigate={dockNavigate}
+        />
+      )}
     </div>
   );
 }

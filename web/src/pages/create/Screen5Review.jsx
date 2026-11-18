@@ -6,7 +6,9 @@ const STEPS = [["downloading", "Download"], ["transcribing", "Transcribe"], ["se
 // Screen 5 — Clip Rendering & Review. Auto-renders every clip on entry (no
 // export yet); each rendered clip shows exactly two actions — Download and
 // Reframe — so reviewers can fix a bad crop before moving on to Export.
-export default function Screen5Review({ busy, snap, clips, error, onCancel, onOpenReframe, onBack, onNext }) {
+export default function Screen5Review({
+  busy, snap, clips, error, onCancel, onPause, onResume, onRetry, onOpenReframe, onBack, onNext
+}) {
   const curStep = STEPS.findIndex(([k]) => k === snap?.stage);
   const done = snap?.status === "done";
   const pct = Math.round((snap?.progress || 0) * 100);
@@ -14,11 +16,25 @@ export default function Screen5Review({ busy, snap, clips, error, onCancel, onOp
   return (
     <div className="wizard-screen">
       <div className="card">
-        <div className="card-h"><h2>Rendering your clips</h2><span className="hint">{clips.length} ready</span></div>
+        <div className="card-h">
+          <h2>Rendering your clips</h2>
+          <span className="hint">{clips.length} ready · Checkpoint saved</span>
+        </div>
 
-        {busy && (
-          <button className="btn btn-cancel" style={{ marginBottom: 14 }} onClick={onCancel}>Cancel</button>
-        )}
+        <div style={{ display: "flex", gap: "8px", marginBottom: "14px", flexWrap: "wrap", alignItems: "center" }}>
+          {snap?.status === "running" && onPause && (
+            <button className="btn" type="button" onClick={onPause}>⏸️ Pause</button>
+          )}
+          {snap?.status === "paused" && onResume && (
+            <button className="btn btn-primary" type="button" onClick={onResume}>▶️ Resume</button>
+          )}
+          {(snap?.status === "error" || snap?.status === "cancelled" || snap?.status === "paused" || error) && onRetry && (
+            <button className="btn btn-primary" type="button" onClick={onRetry}>🔄 Resume from Checkpoint</button>
+          )}
+          {busy && (
+            <button className="btn btn-cancel" type="button" onClick={onCancel}>✕ Cancel</button>
+          )}
+        </div>
         {error && <div className="error">{error}</div>}
 
         {snap && (

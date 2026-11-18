@@ -71,12 +71,12 @@ def download_filename(title: str, language: Optional[str], index: int) -> str:
 
 
 class Job:
-    """A single pipeline run with thread-safe progress + persistent result state."""
+    """A single pipeline run with thread-safe progress + persistent checkpoint state."""
 
     def __init__(self, req: Optional[GenerateRequest] = None, job_id: Optional[str] = None) -> None:
         self.id = job_id or uuid.uuid4().hex
         self.req = req
-        self.status = "queued"  # queued | running | done | error | cancelled
+        self.status = "queued"  # queued | running | paused | done | error | cancelled
         self.stage = "queued"
         self.stage_progress = 0.0  # 0..1 within current stage
         self.progress = 0.0  # 0..1 overall
@@ -85,8 +85,32 @@ class Job:
         self.error: Optional[str] = None
         self.clip_id: Optional[str] = None
         self.cancelled = False
+        self.paused = False
+        self.checkpoint: dict = {}
         self._lock = threading.Lock()
         self._rev = 0  # bumped on every change for SSE diffs
+
+    def pause(self) -> None:
+        """Pause the running pipeline safely; execution parks at next checkpoint."""
+        with self._lock:
+            if self.status not in ("running", "queued"):
+                return
+            self.paused = True
+            self.status = "paused"
+            self.message = f"Paused at {STAGE_LABELS.get(self.stage, self.stage)}."
+            self._rev += 1
+        self._sync_db()
+
+    def resume(self) -> None:
+        """Resume execution from where it paused."""
+        with self._lock:
+            if self.status != "paused":
+                return
+            self.paused = False
+            self.status = "running"
+            self.message = f"Resuming {STAGE_LABELS.get(self.stage, self.stage)}..."
+            self._rev += 1
+        self._sync_db()
 
     def cancel(self) -> None:
         """Flag the run for cancellation; pipeline stops at next checkpoint."""
@@ -94,6 +118,7 @@ class Job:
             if self.status in ("done", "error"):
                 return
             self.cancelled = True
+            self.paused = False
             self.status = "cancelled"
             self.stage = "cancelled"
             self.message = "Cancelled."
@@ -101,12 +126,28 @@ class Job:
 
         self._sync_db()
 
+    def save_checkpoint(self, key: str, value: Any) -> None:
+        """Record stage checkpoint in memory and SQLite."""
+        with self._lock:
+            self.checkpoint[key] = value
+            self._rev += 1
+        self._sync_db()
+
+    def check_pause_or_cancel(self) -> bool:
+        """Helper called by pipeline loops. Blocks while paused, returns True if cancelled."""
+        if self.cancelled:
+            return True
+        while self.paused and not self.cancelled:
+            time.sleep(0.4)
+        return self.cancelled
+
     def set_stage(self, stage: str, frac: float, message: str) -> None:
         """Move to/within a stage and recompute overall progress band."""
         frac = min(1.0, max(0.0, frac))
         lo, hi = _STAGE_SPANS.get(stage, (0.0, 0.0))
         with self._lock:
-            self.status = "running"
+            if self.status != "paused":
+                self.status = "running"
             self.stage = stage
             self.stage_progress = frac
             self.progress = lo + frac * (hi - lo)
@@ -118,7 +159,9 @@ class Job:
     def add_clip(self, clip: dict) -> None:
         """Publish a finished clip so UI can show it before run ends."""
         with self._lock:
-            self.clips.append(clip)
+            # Prevent duplicates by index
+            if not any(c.get("index") == clip.get("index") for c in self.clips):
+                self.clips.append(clip)
             self._rev += 1
 
     def finish(self, clips: List[dict]) -> None:
@@ -144,17 +187,19 @@ class Job:
         self._sync_db()
 
     def _sync_db(self) -> None:
-        """Persist current status to SQLite asynchronously/safely."""
+        """Persist current status and checkpoint to SQLite safely."""
         try:
             with db_session() as session:
                 repo = Repository(session)
                 db_status = "completed" if self.status == "done" else ("failed" if self.status == "error" else self.status)
+                chk_json = json.dumps(self.checkpoint) if self.checkpoint else None
                 repo.update_job_progress(
                     job_id=self.id,
                     stage=self.stage,
                     progress=self.progress,
                     status=db_status,
                     error_message=self.error,
+                    checkpoint_json=chk_json,
                 )
         except Exception:
             pass
@@ -172,6 +217,7 @@ class Job:
                 "clips": list(self.clips),
                 "error": self.error,
                 "clip_id": self.clip_id,
+                "paused": self.paused,
                 "rev": self._rev,
             }
 
@@ -188,7 +234,7 @@ def create_job(req: GenerateRequest) -> Job:
     with _JOBS_LOCK:
         _JOBS[job.id] = job
 
-    # Persist in SQLite
+    # Persist in SQLite with serialized request
     try:
         with db_session() as session:
             repo = Repository(session)
@@ -197,11 +243,14 @@ def create_job(req: GenerateRequest) -> Job:
                 source_uri=src_uri,
                 source_type="upload" if req.upload_id else "url",
             )
+            req_json = json.dumps(req.model_dump(mode="json")) if hasattr(req, "model_dump") else json.dumps(req.dict())
             repo.create_job(
                 job_id=job.id,
                 source_video_id=src_video.id,
                 stage="queued",
                 status="pending",
+                request_json=req_json,
+                checkpoint_json="{}",
             )
     except Exception as e:
         logger.warning("[%s] Failed to record initial job in DB: %s", job.id, e)
@@ -221,12 +270,25 @@ def get_job(job_id: str) -> Optional[Job]:
             repo = Repository(session)
             db_job = repo.get_job(job_id)
             if db_job:
-                reconstructed = Job(req=None, job_id=db_job.id)
+                parsed_req = None
+                if db_job.request_json:
+                    try:
+                        parsed_req = GenerateRequest(**json.loads(db_job.request_json))
+                    except Exception as err:
+                        logger.debug("Failed parsing request_json for job %s: %s", job_id, err)
+
+                reconstructed = Job(req=parsed_req, job_id=db_job.id)
                 reconstructed.status = "done" if db_job.status == "completed" else db_job.status
                 reconstructed.stage = db_job.stage
                 reconstructed.progress = db_job.progress
                 reconstructed.error = db_job.error_message
                 reconstructed.clip_id = db_job.id
+
+                if db_job.checkpoint_json:
+                    try:
+                        reconstructed.checkpoint = json.loads(db_job.checkpoint_json)
+                    except Exception:
+                        pass
 
                 # Load clips
                 db_clips = repo.get_clips_for_job(job_id)
@@ -249,6 +311,64 @@ def get_job(job_id: str) -> Optional[Job]:
     return None
 
 
+def get_active_job() -> Optional[Job]:
+    """Return the most relevant active (running, paused, pending, queued) job."""
+    # Check in-memory first
+    with _JOBS_LOCK:
+        for job in reversed(list(_JOBS.values())):
+            if job.status in ("running", "paused", "queued", "pending"):
+                return job
+
+    # Check database for active or interrupted jobs
+    try:
+        with db_session() as session:
+            repo = Repository(session)
+            db_job = repo.get_active_job()
+            if db_job:
+                return get_job(db_job.id)
+            # If no active job, find the most recently created job if within last hour
+            latest = repo.get_latest_job()
+            if latest and latest.status in ("running", "paused", "pending"):
+                return get_job(latest.id)
+    except Exception as e:
+        logger.debug("Error checking active job: %s", e)
+
+    return None
+
+
+def retry_job(job_id: str) -> Optional[Job]:
+    """Retry a failed or interrupted job from its saved checkpoint."""
+    job = get_job(job_id)
+    if not job:
+        return None
+
+    with job._lock:
+        job.status = "queued"
+        job.error = None
+        job.cancelled = False
+        job.paused = False
+        job.message = "Resuming from saved checkpoint..."
+        job._rev += 1
+
+    job._sync_db()
+    start_job(job)
+    return job
+
+
+def resume_job(job_id: str) -> Optional[Job]:
+    """Resume a paused job; restarts background thread if inactive."""
+    job = get_job(job_id)
+    if not job:
+        return None
+
+    if job.paused:
+        job.resume()
+    elif job.status in ("queued", "pending"):
+        start_job(job)
+
+    return job
+
+
 def start_job(job: Job) -> None:
     """Run pipeline on background daemon thread with durable lease."""
     thread = threading.Thread(target=_run_pipeline, args=(job,), daemon=True)
@@ -269,10 +389,13 @@ def _run_pipeline(job: Job) -> None:
     lease.start()
 
     try:
-        # 1) Get source video
+        # 1) Get source video (check checkpoint first)
         source_mp4 = None
-
-        if req.download_id:
+        saved_source = job.checkpoint.get("source_mp4")
+        if saved_source and Path(saved_source).is_file():
+            source_mp4 = Path(saved_source)
+            job.set_stage("downloading", 1.0, "Source video restored from checkpoint.")
+        elif req.download_id:
             try:
                 source_mp4 = uploads.resolve_upload(req.download_id)
                 job.set_stage("downloading", 1.0, "Video already downloaded. Preparing...")
@@ -303,61 +426,88 @@ def _run_pipeline(job: Job) -> None:
 
             source_mp4 = downloader.download_video(req.video_url, progress_hook=on_download)
 
-        # 2) Transcribe locally
-        clip_id = uuid.uuid4().hex
+        job.save_checkpoint("source_mp4", str(source_mp4.resolve()))
+
+        if job.check_pause_or_cancel():
+            logger.info("[%s] pipeline stopped after download (paused=%s, cancelled=%s)", job.id, job.paused, job.cancelled)
+            return
+
+        # 2) Transcribe locally (check checkpoint first)
+        clip_id = job.checkpoint.get("clip_id") or job.clip_id or uuid.uuid4().hex
         job.clip_id = clip_id
+        job.save_checkpoint("clip_id", clip_id)
         source_id = source_mp4.stem
         device_label = {"auto": "Auto", "cuda": "GPU", "cpu": "CPU"}.get(
             req.device.value, "Auto"
         )
 
-        def on_transcribe(frac: float, msg: str) -> None:
-            job.set_stage("transcribing", frac, msg)
+        transcript = job.checkpoint.get("transcript")
+        if not transcript:
+            def on_transcribe(frac: float, msg: str) -> None:
+                job.set_stage("transcribing", frac, msg)
 
-        if pretranscribe.cached(source_id, req.language) is not None:
-            job.set_stage(
-                "transcribing", 1.0, "Using transcript prepared while you set things up..."
-            )
-        else:
-            running = pretranscribe.find_running(source_id)
-            if running is not None:
-                while True:
-                    snap = running.snapshot()
-                    if snap.get("status") != "running":
-                        break
-                    job.set_stage(
-                        "transcribing", snap.get("progress", 0.0),
-                        f"Transcribing audio with local Whisper ({device_label})... "
-                        f"{int((snap.get('progress') or 0) * 100)}%",
-                    )
-                    time.sleep(0.4)
-            else:
+            if pretranscribe.cached(source_id, req.language) is not None:
                 job.set_stage(
-                    "transcribing", 0.0,
-                    f"Transcribing audio with local Whisper ({device_label})...",
+                    "transcribing", 1.0, "Using transcript prepared while you set things up..."
                 )
+            else:
+                running = pretranscribe.find_running(source_id)
+                if running is not None:
+                    while True:
+                        if job.check_pause_or_cancel():
+                            return
+                        snap = running.snapshot()
+                        if snap.get("status") != "running":
+                            break
+                        job.set_stage(
+                            "transcribing", snap.get("progress", 0.0),
+                            f"Transcribing audio with local Whisper ({device_label})... "
+                            f"{int((snap.get('progress') or 0) * 100)}%",
+                        )
+                        time.sleep(0.4)
+                else:
+                    job.set_stage(
+                        "transcribing", 0.0,
+                        f"Transcribing audio with local Whisper ({device_label})...",
+                    )
 
-        transcript = pretranscribe.get_or_transcribe(
-            source_mp4, source_id, req.device.value,
-            progress=on_transcribe, language=req.language,
-        )
+            transcript = pretranscribe.get_or_transcribe(
+                source_mp4, source_id, req.device.value,
+                progress=on_transcribe, language=req.language,
+            )
+            job.save_checkpoint("transcript", transcript)
+        else:
+            job.set_stage("transcribing", 1.0, "Transcript restored from checkpoint.")
+
+        if job.check_pause_or_cancel():
+            logger.info("[%s] pipeline stopped after transcription (paused=%s, cancelled=%s)", job.id, job.paused, job.cancelled)
+            return
 
         forced = (req.language or "").strip().lower()
         caption_language = (
             forced if forced and forced != "auto" else transcript.get("language")
         )
 
-        # 3) Select clips
-        job.set_stage("selecting", 0.3, "Analyzing transcript for the best moments...")
-        windows = selector.select_clips(transcript, req.num_clips, req.clip_length)
+        # 3) Select clips (check checkpoint first)
+        windows = job.checkpoint.get("windows")
         if not windows:
-            raise ClipGenerationError(
-                "Could not find any suitable clip windows in this video. "
-                "Try a longer video or fewer clips."
-            )
-        job.set_stage("selecting", 1.0, f"Found {len(windows)} clip(s) to render.")
+            job.set_stage("selecting", 0.3, "Analyzing transcript for the best moments...")
+            windows = selector.select_clips(transcript, req.num_clips, req.clip_length)
+            if not windows:
+                raise ClipGenerationError(
+                    "Could not find any suitable clip windows in this video. "
+                    "Try a longer video or fewer clips."
+                )
+            job.save_checkpoint("windows", windows)
+            job.set_stage("selecting", 1.0, f"Found {len(windows)} clip(s) to render.")
+        else:
+            job.set_stage("selecting", 1.0, f"Restored {len(windows)} clip window(s) from checkpoint.")
 
-        # 4) Per clip: build ASS captions + render with ffmpeg
+        if job.check_pause_or_cancel():
+            logger.info("[%s] pipeline stopped after selection (paused=%s, cancelled=%s)", job.id, job.paused, job.cancelled)
+            return
+
+        # 4) Per clip: build ASS captions + render with ffmpeg (skip already rendered)
         words = transcript.get("words") or []
         caption_overrides = (
             req.caption_overrides.model_dump() if req.caption_overrides else None
@@ -373,12 +523,28 @@ def _run_pipeline(job: Job) -> None:
         clip_dir = CLIPS_DIR / clip_id
         clip_dir.mkdir(parents=True, exist_ok=True)
 
-        results: List[dict] = []
+        rendered_indexes = set(job.checkpoint.get("rendered_indexes", []))
+        results: List[dict] = list(job.checkpoint.get("clips", []))
+        # Ensure in-memory clips contains anything from checkpoint
+        for existing_clip in results:
+            job.add_clip(existing_clip)
+
         total = len(windows)
         for index, win in enumerate(windows):
-            if job.cancelled:
-                logger.info("[%s] cancelled before clip %d", job.id, index)
+            if job.check_pause_or_cancel():
+                logger.info("[%s] pipeline stopped during render loop (index=%d, paused=%s, cancelled=%s)", job.id, index, job.paused, job.cancelled)
                 return
+
+            clip_out = clip_dir / f"{index}.mp4"
+            if index in rendered_indexes and clip_out.is_file() and clip_out.stat().st_size > 1024:
+                logger.info("[%s] clip %d already rendered; reusing from checkpoint.", job.id, index)
+                job.set_stage(
+                    "rendering",
+                    (index + 1) / total,
+                    f"Clip {index + 1} of {total} restored from checkpoint.",
+                )
+                continue
+
             start, end = float(win["start"]), float(win["end"])
             job.set_stage(
                 "rendering",
@@ -448,7 +614,14 @@ def _run_pipeline(job: Job) -> None:
                 "filename": download_filename(title, caption_language, index),
             }
             results.append(clip)
+            rendered_indexes.add(index)
+            job.save_checkpoint("rendered_indexes", list(rendered_indexes))
+            job.save_checkpoint("clips", results)
             job.add_clip(clip)
+
+        if job.check_pause_or_cancel():
+            logger.info("[%s] pipeline stopped before finish (paused=%s, cancelled=%s)", job.id, job.paused, job.cancelled)
+            return
 
         job.finish(results)
         logger.info("[%s] pipeline complete: %d clips", job.id, len(results))

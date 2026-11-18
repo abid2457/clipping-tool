@@ -64,6 +64,19 @@ def db_session() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """Initialize database tables idempotently."""
+    """Initialize database tables idempotently and migrate new columns."""
     from app.database import models  # noqa: F401
     Base.metadata.create_all(bind=engine)
+
+    try:
+        with engine.connect() as conn:
+            cursor = conn.connection.cursor()
+            cursor.execute("PRAGMA table_info(jobs)")
+            existing_cols = {col[1] for col in cursor.fetchall()}
+            if "request_json" not in existing_cols:
+                cursor.execute("ALTER TABLE jobs ADD COLUMN request_json TEXT")
+            if "checkpoint_json" not in existing_cols:
+                cursor.execute("ALTER TABLE jobs ADD COLUMN checkpoint_json TEXT")
+            conn.connection.commit()
+    except Exception:
+        pass

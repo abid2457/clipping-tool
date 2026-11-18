@@ -659,7 +659,7 @@ select { appearance: none; cursor: pointer;
 }
 .brand-mark svg { width: 46px; height: 46px; }
 .brand-word { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; }
-.brand-by-hero { font-size: 11.5px; font-weight: 700; color: var(--muted-2); letter-spacing: 0.1em; text-transform: uppercase; margin-top: -10px; }
+.brand-by-hero { font-size: 11px; font-weight: 700; color: var(--accent); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 4px; }
 @keyframes mark-pop { from { opacity: 0; transform: scale(.8) translateY(8px); } to { opacity: 1; transform: none; } }
 @keyframes mark-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
 
@@ -1013,3 +1013,143 @@ select optgroup { font-weight: 700; }
 .reframe-kf-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px;
   border-radius: 8px; cursor: pointer; font-size: 12.5px; font-family: var(--mono); color: var(--text); }
 .reframe-kf-row:hover { background: var(--surface-2); }
+
+
+/* ==========================================================================
+   Active Job Dock — persistent floating widget (bottom-right corner)
+   ========================================================================== */
+.active-job-dock {
+  position: fixed;
+  bottom: 20px;
+  right: 24px;
+  z-index: 9999;
+  min-width: 280px;
+  max-width: 360px;
+  padding: 14px 16px 12px;
+  background: rgba(14, 16, 23, 0.92);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg), 0 0 40px -12px rgba(0, 210, 157, 0.18);
+  font-family: var(--sans);
+  animation: dock-slide-in 0.35s var(--ease) both;
+}
+@keyframes dock-slide-in {
+  from { opacity: 0; transform: translateY(16px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.active-job-dock.dock-running { border-color: var(--emerald-soft); }
+.active-job-dock.dock-paused  { border-color: rgba(255, 193, 7, 0.3); }
+.active-job-dock.dock-done    { border-color: var(--ok-soft); }
+.active-job-dock.dock-error   { border-color: var(--danger-soft); }
+.active-job-dock.dock-cancelled { border-color: var(--line); }
+
+:root[data-theme="light"] .active-job-dock {
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow-lg), 0 0 40px -12px rgba(0, 210, 157, 0.12);
+}
+
+.dock-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.dock-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+.dock-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted-2);
+  flex-shrink: 0;
+}
+.dock-pulse.pulse-active {
+  background: var(--emerald);
+  box-shadow: 0 0 6px 1px var(--emerald-glow);
+  animation: dock-pulse-anim 1.6s ease-in-out infinite;
+}
+@keyframes dock-pulse-anim {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.5; transform: scale(1.3); }
+}
+.dock-paused .dock-pulse { background: #ffc107; box-shadow: 0 0 6px 1px rgba(255, 193, 7, 0.35); animation: none; }
+.dock-done .dock-pulse   { background: var(--ok); animation: none; }
+.dock-error .dock-pulse  { background: var(--danger); animation: none; }
+
+.dock-status-label { text-transform: uppercase; letter-spacing: 0.6px; font-size: 11px; }
+.dock-pct { color: var(--accent); font-family: var(--mono); font-size: 12px; font-weight: 600; }
+
+.dock-nav-btn {
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  color: var(--muted);
+  padding: 5px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: color 0.15s, border-color 0.15s;
+}
+.dock-nav-btn:hover { color: var(--accent); border-color: var(--accent-soft); }
+
+.dock-track {
+  width: 100%;
+  height: 4px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.dock-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent-grad);
+  transition: width 0.4s var(--ease);
+}
+
+.dock-msg {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.dock-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dock-btn {
+  padding: 4px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--line-2);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.dock-btn:hover { background: var(--surface-3); border-color: var(--line-2); }
+.dock-btn-pause:hover  { color: #ffc107; border-color: rgba(255, 193, 7, 0.3); }
+.dock-btn-resume:hover { color: var(--accent); border-color: var(--accent-soft); }
+.dock-btn-cancel:hover { color: var(--danger); border-color: var(--danger-soft); }
+.dock-btn-retry:hover  { color: var(--accent); border-color: var(--accent-soft); }
+
+/* Hide dock on small screens where it would overlay content */
+@media (max-width: 480px) {
+  .active-job-dock { left: 12px; right: 12px; min-width: auto; max-width: none; bottom: 12px; }
+}

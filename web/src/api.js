@@ -78,6 +78,12 @@ export const api = {
     }),
 
   // Tech Hub v2.0 API additions
+  activeJob: () => jget("/api/v2/jobs/active"),
+  pauseJob: (jobId) => jpost(`/api/v2/jobs/${jobId}/pause`, {}),
+  resumeJob: (jobId) => jpost(`/api/v2/jobs/${jobId}/resume`, {}),
+  retryJob: (jobId) => jpost(`/api/v2/jobs/${jobId}/retry`, {}),
+  cancelJob: (jobId) => jpost(`/api/v2/jobs/${jobId}/cancel`, {}),
+  jobResult: (jobId) => jget(`/api/result/${jobId}`),
   getOAuthUrl: () => jget("/api/v2/oauth/url"),
   youtubeChannels: () => jget("/api/v2/youtube/channels"),
   youtubeQuota: () => jget("/api/v2/youtube/quota"),
@@ -108,20 +114,51 @@ export const api = {
   subtitleUrl: (clipId, index, format = "srt") => `/api/clip/${clipId}/${index}/subtitles?format=${format}`,
 };
 
-// Subscribe to a job's Server-Sent Events. Returns a close() fn.
+// Subscribe to a job's Server-Sent Events with automatic auto-reconnect. Returns a close() fn.
 export function streamProgress(jobId, onSnap, onError) {
-  const es = new EventSource(`/api/progress/${jobId}`);
-  es.onmessage = (ev) => {
-    try { onSnap(JSON.parse(ev.data)); } catch {}
-  };
-  es.onerror = async () => {
-    es.close();
-    // Fall back to a one-shot result fetch so we don't lose the final state.
+  let active = true;
+  let es = null;
+
+  function connect() {
+    if (!active) return;
     try {
-      const r = await fetch(`/api/result/${jobId}`);
-      if (r.ok) { onSnap(await r.json()); return; }
-    } catch {}
-    if (onError) onError();
+      es = new EventSource(`/api/progress/${jobId}`);
+      es.onmessage = (ev) => {
+        try {
+          const snap = JSON.parse(ev.data);
+          onSnap(snap);
+          if (snap.status === "done" || snap.status === "error" || snap.status === "cancelled") {
+            active = false;
+            es && es.close();
+          }
+        } catch {}
+      };
+      es.onerror = async () => {
+        if (!active) return;
+        es && es.close();
+        // Fall back to a one-shot result fetch so we don't lose state.
+        try {
+          const r = await fetch(`/api/result/${jobId}`);
+          if (r.ok) {
+            const snap = await r.json();
+            onSnap(snap);
+            if (snap.status === "running" || snap.status === "paused" || snap.status === "queued") {
+              // Still running on backend — auto-reconnect after brief pause
+              setTimeout(connect, 1200);
+              return;
+            }
+          }
+        } catch {}
+        if (onError) onError();
+      };
+    } catch {
+      if (onError) onError();
+    }
+  }
+
+  connect();
+  return () => {
+    active = false;
+    es && es.close();
   };
-  return () => es.close();
 }

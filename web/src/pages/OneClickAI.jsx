@@ -16,11 +16,13 @@ export default function OneClickAI() {
 
   // Job progress
   const [isGenerating, setIsGenerating] = useState(false);
+  const [jobStatus, setJobStatus] = useState("idle");
   const [progressMsg, setProgressMsg] = useState("");
   const [pct, setPct] = useState(0);
   const [results, setResults] = useState([]);
   const [lastJobId, setLastJobId] = useState("");
   const [error, setError] = useState(null);
+  const unsubRef = useRef(null);
 
   // Publish Modal State (for direct publishing from OneClickAI)
   const [publishModalClip, setPublishModalClip] = useState(null);
@@ -37,11 +39,85 @@ export default function OneClickAI() {
   const [modalError, setModalError] = useState("");
   const [isGeneratingMeta, setIsGeneratingMeta] = useState(false);
 
+  const subscribeToJob = (jobId) => {
+    setLastJobId(jobId);
+    if (unsubRef.current) unsubRef.current();
+
+    unsubRef.current = streamProgress(
+      jobId,
+      (snap) => {
+        if (snap.message) setProgressMsg(snap.message);
+        if (snap.progress !== undefined) setPct(Math.round(snap.progress * 100));
+        if (snap.clips && snap.clips.length > 0) setResults(snap.clips);
+        setJobStatus(snap.status);
+        if (snap.status === "running") {
+          setIsGenerating(true);
+        } else if (snap.status === "paused") {
+          setIsGenerating(true);
+        } else if (snap.status === "done") {
+          setIsGenerating(false);
+        } else if (snap.status === "error") {
+          setIsGenerating(false);
+          setError(snap.error || snap.message || "Generation error.");
+        } else if (snap.status === "cancelled") {
+          setIsGenerating(false);
+        }
+      },
+      () => {
+        console.warn("OneClickAI stream reconnecting...");
+      }
+    );
+  };
+
   useEffect(() => {
+    let alive = true;
     api.youtubeChannels().then((chs) => {
-      setChannels(chs || []);
-      if (chs && chs.length > 0) setPublishChannelId(chs[0].id);
+      if (alive) {
+        setChannels(chs || []);
+        if (chs && chs.length > 0) setPublishChannelId(chs[0].id);
+      }
     }).catch(() => {});
+
+    // Auto-resume: Check if there is an in-progress or paused job on the backend
+    const checkActiveJob = async () => {
+      try {
+        const res = await api.activeJob();
+        if (!alive) return;
+        if (res.has_active_job && res.job) {
+          const j = res.job;
+          setLastJobId(j.id);
+          setJobStatus(j.status);
+          if (j.clips && j.clips.length > 0) setResults(j.clips);
+          if (j.status === "running" || j.status === "paused" || j.status === "queued" || j.status === "pending") {
+            setIsGenerating(true);
+            setProgressMsg(j.message || "Resuming video pipeline...");
+            setPct(Math.round((j.progress || 0) * 100));
+            subscribeToJob(j.id);
+          } else if (j.status === "done") {
+            setIsGenerating(false);
+            if (j.clips) setResults(j.clips);
+          }
+        }
+      } catch (e) {
+        console.debug("Active job check:", e);
+      }
+    };
+
+    checkActiveJob();
+
+    // Recheck whenever tab becomes visible (user returns to this tab)
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        checkActiveJob();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (unsubRef.current) unsubRef.current();
+    };
   }, []);
 
   const handleFileUpload = async (file) => {
@@ -94,31 +170,60 @@ export default function OneClickAI() {
 
     try {
       const resp = await api.generate(payload);
-      const jobId = resp.job_id;
-      setLastJobId(jobId);
-
-      const unsub = streamProgress(
-        jobId,
-        (snap) => {
-          if (snap.message) setProgressMsg(snap.message);
-          if (snap.progress !== undefined) setPct(Math.round(snap.progress * 100));
-          if (snap.clips && snap.clips.length > 0) setResults(snap.clips);
-          if (snap.status === "done") {
-            setIsGenerating(false);
-            unsub();
-          } else if (snap.status === "error") {
-            setError(snap.error || "Generation encountered an error.");
-            setIsGenerating(false);
-            unsub();
-          }
-        },
-        () => {
-          setIsGenerating(false);
-        }
-      );
+      subscribeToJob(resp.job_id);
     } catch (e) {
       setError(e.message || "Failed to start generation.");
       setIsGenerating(false);
+      setJobStatus("error");
+    }
+  };
+
+  const handlePause = async () => {
+    if (!lastJobId) return;
+    try {
+      await api.pauseJob(lastJobId);
+      setJobStatus("paused");
+      setProgressMsg("Pausing at current stage...");
+    } catch (e) {
+      setError("Failed to pause: " + e.message);
+    }
+  };
+
+  const handleResume = async () => {
+    if (!lastJobId) return;
+    try {
+      await api.resumeJob(lastJobId);
+      setJobStatus("running");
+      setProgressMsg("Resuming generation from checkpoint...");
+    } catch (e) {
+      setError("Failed to resume: " + e.message);
+    }
+  };
+
+  const handleRetry = async () => {
+    if (!lastJobId) return;
+    try {
+      setIsGenerating(true);
+      setJobStatus("running");
+      setError(null);
+      setProgressMsg("Retrying from saved checkpoint...");
+      await api.retryJob(lastJobId);
+      subscribeToJob(lastJobId);
+    } catch (e) {
+      setError("Failed to retry: " + e.message);
+      setIsGenerating(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!lastJobId) return;
+    try {
+      await api.cancelJob(lastJobId);
+      setIsGenerating(false);
+      setJobStatus("cancelled");
+      setProgressMsg("Generation cancelled.");
+    } catch (e) {
+      setError("Failed to cancel: " + e.message);
     }
   };
 
@@ -450,14 +555,76 @@ export default function OneClickAI() {
             : `🚀 Generate AI ${uploadMode === "shorts" ? "YouTube Shorts" : "YouTube Videos"}`}
         </button>
 
-        {isGenerating && (
-          <div style={{ marginTop: "1.25rem" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem", marginBottom: "0.4rem", color: "#94a3b8" }}>
-              <span>{progressMsg}</span>
-              <span>{pct}%</span>
+        {(isGenerating || jobStatus === "paused" || (jobStatus === "error" && lastJobId)) && (
+          <div style={{ marginTop: "1.25rem", padding: "1.25rem", borderRadius: "10px", background: "rgba(15, 23, 42, 0.85)", border: "1px solid var(--line-2)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.6rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{
+                  padding: "3px 8px", borderRadius: "999px", fontSize: "0.72rem", fontWeight: "700", textTransform: "uppercase",
+                  background: jobStatus === "paused" ? "rgba(245, 158, 11, 0.2)" : (jobStatus === "error" ? "rgba(239, 68, 68, 0.2)" : "rgba(0, 210, 157, 0.2)"),
+                  color: jobStatus === "paused" ? "#f59e0b" : (jobStatus === "error" ? "#ef4444" : "#00d29d"),
+                  border: `1px solid ${jobStatus === "paused" ? "#f59e0b" : (jobStatus === "error" ? "#ef4444" : "#00d29d")}`
+                }}>
+                  {jobStatus === "paused" ? "⏸️ Paused" : (jobStatus === "error" ? "⚠️ Interrupted" : "⚡ Background Active")}
+                </span>
+                <span style={{ fontSize: "0.85rem", color: "#e2e8f0", fontWeight: "600" }}>{progressMsg}</span>
+              </div>
+              <span style={{ fontSize: "0.9rem", color: "#00d29d", fontWeight: "700", fontFamily: "var(--mono)" }}>{pct}%</span>
             </div>
-            <div style={{ width: "100%", height: "8px", background: "#0f172a", borderRadius: "4px", overflow: "hidden" }}>
-              <div style={{ width: `${pct}%`, height: "100%", background: "#00d29d", transition: "width 0.3s ease" }} />
+
+            <div style={{ width: "100%", height: "8px", background: "#0f172a", borderRadius: "4px", overflow: "hidden", marginBottom: "0.85rem" }}>
+              <div style={{
+                width: `${pct}%`, height: "100%",
+                background: jobStatus === "paused" ? "#f59e0b" : (jobStatus === "error" ? "#ef4444" : "#00d29d"),
+                transition: "width 0.3s ease"
+              }} />
+            </div>
+
+            {/* Checkpoint Controls: Pause, Resume, Retry, Cancel */}
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center" }}>
+              <span style={{ fontSize: "0.75rem", color: "#64748b", marginRight: "auto" }}>
+                Checkpoint saved · Auto-resumes on tab switch or reload
+              </span>
+
+              {jobStatus === "running" && (
+                <button
+                  type="button"
+                  onClick={handlePause}
+                  style={{ padding: "0.45rem 0.9rem", borderRadius: "6px", background: "#334155", color: "#f8fafc", border: "none", cursor: "pointer", fontSize: "0.8rem", fontWeight: "600" }}
+                >
+                  ⏸️ Pause
+                </button>
+              )}
+
+              {jobStatus === "paused" && (
+                <button
+                  type="button"
+                  onClick={handleResume}
+                  style={{ padding: "0.45rem 0.9rem", borderRadius: "6px", background: "#00d29d", color: "#0f172a", border: "none", cursor: "pointer", fontSize: "0.8rem", fontWeight: "700" }}
+                >
+                  ▶️ Resume
+                </button>
+              )}
+
+              {(jobStatus === "error" || jobStatus === "cancelled" || jobStatus === "paused") && (
+                <button
+                  type="button"
+                  onClick={handleRetry}
+                  style={{ padding: "0.45rem 0.9rem", borderRadius: "6px", background: "#3b82f6", color: "#fff", border: "none", cursor: "pointer", fontSize: "0.8rem", fontWeight: "700" }}
+                >
+                  🔄 Resume from Checkpoint
+                </button>
+              )}
+
+              {(jobStatus === "running" || jobStatus === "paused") && (
+                <button
+                  type="button"
+                  onClick={handleCancel}
+                  style={{ padding: "0.45rem 0.9rem", borderRadius: "6px", background: "rgba(239, 68, 68, 0.2)", color: "#fca5a5", border: "1px solid #ef4444", cursor: "pointer", fontSize: "0.8rem", fontWeight: "600" }}
+                >
+                  ✕ Cancel
+                </button>
+              )}
             </div>
           </div>
         )}

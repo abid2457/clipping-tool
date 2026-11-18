@@ -113,6 +113,8 @@ class Job(Base):
     lease_expires_at = Column(DateTime(timezone=True), nullable=True)
     error_code = Column(String(50), nullable=True)
     error_message = Column(Text, nullable=True)
+    request_json = Column(Text, nullable=True)  # Serialized GenerateRequest payload
+    checkpoint_json = Column(Text, nullable=True)  # Checkpoint state (source_mp4, transcript, windows, rendered_indexes)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 

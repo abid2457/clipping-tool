@@ -38,6 +38,8 @@ class Repository:
         idempotency_key: Optional[str] = None,
         stage: str = "queued",
         status: str = "pending",
+        request_json: Optional[str] = None,
+        checkpoint_json: Optional[str] = None,
     ) -> Job:
         job = Job(
             id=job_id,
@@ -48,6 +50,8 @@ class Repository:
             status=status,
             progress=0.0,
             attempt_count=0,
+            request_json=request_json,
+            checkpoint_json=checkpoint_json,
         )
         self.db.add(job)
         self.db.flush()
@@ -57,6 +61,21 @@ class Repository:
     def get_job(self, job_id: str) -> Optional[Job]:
         return self.db.execute(select(Job).where(Job.id == job_id)).scalar_one_or_none()
 
+    def get_active_job(self) -> Optional[Job]:
+        """Find the most recent non-completed, non-failed job (running, pending, paused, queued)."""
+        stmt = (
+            select(Job)
+            .where(Job.status.in_(("pending", "running", "paused", "queued")))
+            .order_by(desc(Job.created_at))
+            .limit(1)
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def get_latest_job(self) -> Optional[Job]:
+        """Find the most recent job regardless of status."""
+        stmt = select(Job).order_by(desc(Job.created_at)).limit(1)
+        return self.db.execute(stmt).scalar_one_or_none()
+
     def update_job_progress(
         self,
         job_id: str,
@@ -65,6 +84,7 @@ class Repository:
         status: Optional[str] = None,
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
+        checkpoint_json: Optional[str] = None,
     ) -> Optional[Job]:
         values: Dict[str, Any] = {
             "stage": stage,
@@ -77,6 +97,8 @@ class Repository:
             values["error_code"] = error_code
         if error_message is not None:
             values["error_message"] = error_message
+        if checkpoint_json is not None:
+            values["checkpoint_json"] = checkpoint_json
 
         stmt = update(Job).where(Job.id == job_id).values(**values)
         self.db.execute(stmt)

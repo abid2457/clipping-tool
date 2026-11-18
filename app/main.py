@@ -640,6 +640,60 @@ def result(job_id: str) -> dict:
     return job.snapshot()
 
 
+# --------------------------------------------------------------------------- #
+# V2 Background Processing, Checkpointing & Auto-Resume Endpoints
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/v2/jobs/active")
+def get_active_job_status() -> dict:
+    """Return currently active, paused, or recently completed video generation job."""
+    job = jobs.get_active_job()
+    if not job:
+        return {"has_active_job": False, "job": None}
+    return {
+        "has_active_job": True,
+        "job": job.snapshot(),
+    }
+
+
+@app.post("/api/v2/jobs/{job_id}/pause")
+def pause_job_endpoint(job_id: str) -> dict:
+    """Pause a running video generation job."""
+    job = jobs.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    job.pause()
+    return {"status": "ok", "job": job.snapshot()}
+
+
+@app.post("/api/v2/jobs/{job_id}/resume")
+def resume_job_endpoint(job_id: str) -> dict:
+    """Resume a paused video generation job from its checkpoint."""
+    job = jobs.resume_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return {"status": "ok", "job": job.snapshot()}
+
+
+@app.post("/api/v2/jobs/{job_id}/retry")
+def retry_job_endpoint(job_id: str) -> dict:
+    """Retry a failed or interrupted job from its last checkpoint without duplicating work."""
+    job = jobs.retry_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or missing request configuration.")
+    return {"status": "ok", "job": job.snapshot()}
+
+
+@app.post("/api/v2/jobs/{job_id}/cancel")
+def cancel_job_endpoint(job_id: str) -> dict:
+    """Cancel a video generation job."""
+    job = jobs.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    job.cancel()
+    return {"status": "ok", "job": job.snapshot()}
+
+
 # Catch-all guard: turn any unexpected error into a clean 500 (no crash).
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request, exc):  # noqa: ANN001
