@@ -1,4 +1,5 @@
 import { Icons } from "../../components/Icons.jsx";
+import logoImg from "../../assets/logo.jpg";
 
 // Screen 1 — Video Input. Only a URL paste or a file upload; nothing else to
 // decide here. Choosing either lights up "Continue", which is the sole way
@@ -13,16 +14,18 @@ export default function Screen1Input({
   return (
     <>
       <div className="landing">
-        <div className="brand-hero">
-          <span className="brand-mark"><Icons.bolt /></span>
-          <span className="brand-word">ClipForge</span>
-          <span className="brand-by-hero">by Haris AI</span>
+        <div className="brand-hero" style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 12 }}>
+          <img src={logoImg} alt="Tech Hub" style={{ width: 44, height: 44, borderRadius: 12, objectFit: "cover", boxShadow: "0 4px 16px -4px var(--accent)" }} />
+          <div style={{ display: "flex", flexDirection: "column", textAlign: "left" }}>
+            <span className="brand-word" style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-0.02em" }}>Tech Hub</span>
+            <span className="brand-by-hero" style={{ fontSize: 10, fontWeight: 700, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Created by Barakah Tech</span>
+          </div>
         </div>
-        <span className="eyebrow"><span className="eyebrow-dot" />100% local pipeline · no API keys</span>
-        <h1 className="landing-title">Turn any video into <span className="grad">captioned shorts</span></h1>
+        <span className="eyebrow"><span className="eyebrow-dot" />100% local AI pipeline · zero cloud dependency</span>
+        <h1 className="landing-title">Turn any video into <span className="grad">viral Shorts & clips</span></h1>
         <p className="landing-sub">
-          Paste a link or drop a file — ClipForge finds the best moments, reframes them
-          vertical, and burns on styled captions, right on your own machine.
+          Paste a link or drop a video — Tech Hub discovers high-engagement moments, reframes
+          them with AI, and renders kinetic captions on your local machine.
         </p>
 
         <div

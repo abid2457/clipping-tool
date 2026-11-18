@@ -52,10 +52,10 @@ export default function PublishingQueue() {
   const openPublishModal = async (item) => {
     const meta = item.metadata || {};
     const defaultTitle = meta.primary_title || item.title || "Viral Short";
-    const defaultDesc = meta.description || `Watch this highlight: ${defaultTitle}\n\n#Shorts #ClipForge`;
+    const defaultDesc = meta.description || `Watch this highlight: ${defaultTitle}\n\n#Shorts #TechHub #BarakahTech`;
     const defaultTags = (meta.hashtags && meta.hashtags.length > 0)
       ? meta.hashtags.join(" ")
-      : "#Shorts #Viral #ClipForge";
+      : "#Shorts #Viral #TechHub #BarakahTech";
 
     setActiveClip(item);
     setPublishTitle(defaultTitle);
@@ -256,7 +256,7 @@ export default function PublishingQueue() {
   const titlePillStyle = (selected) => ({
     padding: "0.35rem 0.65rem",
     borderRadius: "6px",
-    background: selected ? "#84cc16" : "#334155",
+    background: selected ? "#00d29d" : "#334155",
     color: selected ? "#0f172a" : "#e2e8f0",
     border: "none",
     cursor: "pointer",
@@ -340,7 +340,7 @@ export default function PublishingQueue() {
                   />
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: "0.5rem", fontSize: "0.75rem", color: "#94a3b8" }}>
                     <span>Duration: {item.duration}s</span>
-                    <span style={{ color: item.quality_status === "passed" ? "#84cc16" : "#f59e0b", fontWeight: "600" }}>
+                    <span style={{ color: item.quality_status === "passed" ? "#00d29d" : "#f59e0b", fontWeight: "600" }}>
                       Quality: {item.quality_status.toUpperCase()}
                     </span>
                   </div>
@@ -364,7 +364,7 @@ export default function PublishingQueue() {
                         >
                           {isPublished ? "PUBLISHED TO YOUTUBE" : item.review_status.toUpperCase()}
                         </span>
-                        <span style={{ fontSize: "0.85rem", color: "#84cc16", fontWeight: "700" }}>
+                        <span style={{ fontSize: "0.85rem", color: "#00d29d", fontWeight: "700" }}>
                           ⭐ Virality Score: {item.score ? item.score.toFixed(1) : "8.0"} / 10
                         </span>
                       </div>
@@ -427,7 +427,7 @@ export default function PublishingQueue() {
                         style={{
                           padding: "0.55rem 1.25rem",
                           borderRadius: "6px",
-                          background: isPublished ? "#059669" : "var(--accent, #84cc16)",
+                          background: isPublished ? "#059669" : "var(--accent, #00d29d)",
                           color: "#0f172a",
                           border: "none",
                           cursor: "pointer",
@@ -502,7 +502,7 @@ export default function PublishingQueue() {
             {uploadSuccess ? (
               <div style={{ textAlign: "center", padding: "1.5rem 0" }}>
                 <div style={{ fontSize: "3rem", marginBottom: "0.5rem" }}>🎉</div>
-                <h3 style={{ fontSize: "1.25rem", fontWeight: "700", color: "#84cc16", marginBottom: "0.5rem" }}>
+                <h3 style={{ fontSize: "1.25rem", fontWeight: "700", color: "#00d29d", marginBottom: "0.5rem" }}>
                   {uploadSuccess.uploadMode === "shorts" ? "Short" : "Video"} Published Successfully!
                 </h3>
                 <p style={{ color: "#cbd5e1", fontSize: "0.95rem", marginBottom: "0.5rem" }}>
@@ -598,7 +598,7 @@ export default function PublishingQueue() {
                       </span>
                       <span style={{
                         fontSize: "0.78rem", fontWeight: "600",
-                        color: clipInfoData.is_shorts_eligible ? "#84cc16" : "#f59e0b",
+                        color: clipInfoData.is_shorts_eligible ? "#00d29d" : "#f59e0b",
                       }}>
                         {clipInfoData.is_shorts_eligible ? "✅ Shorts Eligible (9:16)" : "ℹ️ 16:9 Horizontal"}
                       </span>

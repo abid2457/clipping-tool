@@ -539,6 +539,18 @@ def index() -> FileResponse:
     return FileResponse(str(target), headers={"Cache-Control": "no-store"})
 
 
+@app.get("/logo.jpg")
+@app.get("/favicon.ico")
+def get_logo():
+    """Serve the official Tech Hub / Barakah Tech logo as favicon and image."""
+    logo_path = WEB_DIST_DIR / "logo.jpg"
+    if not logo_path.is_file():
+        logo_path = Path(__file__).resolve().parent.parent / "web" / "src" / "assets" / "logo.jpg"
+    if logo_path.is_file():
+        return FileResponse(str(logo_path), media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail="Logo not found")
+
+
 @app.post("/api/generate")
 def generate(req: GenerateRequest) -> dict:
     """Start the pipeline on a background thread and return a job id.

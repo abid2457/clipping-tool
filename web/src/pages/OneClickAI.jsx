@@ -126,8 +126,8 @@ export default function OneClickAI() {
     const defaultTitle = clip.title || `Clip ${idx + 1}`;
     setPublishModalClip({ ...clip, index: idx });
     setPublishTitle(defaultTitle);
-    setPublishDesc(`Watch this highlight: ${defaultTitle}\n\n#Shorts #ClipForge`);
-    setPublishTags("#Shorts #Viral #ClipForge");
+    setPublishDesc(`Watch this highlight: ${defaultTitle}\n\n#Shorts #TechHub #BarakahTech`);
+    setPublishTags("#Shorts #Viral #TechHub #BarakahTech");
     setPublishPrivacy("public");
     setModalUploadMode(uploadMode);
     setUploadSuccess(null);
@@ -216,8 +216,8 @@ export default function OneClickAI() {
                 flex: 1,
                 padding: "0.75rem",
                 borderRadius: "8px",
-                border: sourceType === "url" ? "2px solid #84cc16" : "1px solid #334155",
-                background: sourceType === "url" ? "rgba(132, 204, 22, 0.15)" : "#0f172a",
+                border: sourceType === "url" ? "2px solid #00d29d" : "1px solid #334155",
+                background: sourceType === "url" ? "rgba(0, 210, 157, 0.15)" : "#0f172a",
                 color: sourceType === "url" ? "#fff" : "#94a3b8",
                 fontWeight: "700",
                 cursor: "pointer",
@@ -232,8 +232,8 @@ export default function OneClickAI() {
                 flex: 1,
                 padding: "0.75rem",
                 borderRadius: "8px",
-                border: sourceType === "system" ? "2px solid #84cc16" : "1px solid #334155",
-                background: sourceType === "system" ? "rgba(132, 204, 22, 0.15)" : "#0f172a",
+                border: sourceType === "system" ? "2px solid #00d29d" : "1px solid #334155",
+                background: sourceType === "system" ? "rgba(0, 210, 157, 0.15)" : "#0f172a",
                 color: sourceType === "system" ? "#fff" : "#94a3b8",
                 fontWeight: "700",
                 cursor: "pointer",
@@ -294,16 +294,16 @@ export default function OneClickAI() {
             >
               {isUploadingFile ? (
                 <div>
-                  <div style={{ fontSize: "1rem", color: "#84cc16", marginBottom: "0.5rem" }}>
+                  <div style={{ fontSize: "1rem", color: "#00d29d", marginBottom: "0.5rem" }}>
                     Uploading to Local System: {uploadPct}%
                   </div>
                   <div style={{ width: "200px", height: "6px", background: "#334155", borderRadius: "3px", margin: "0 auto", overflow: "hidden" }}>
-                    <div style={{ width: `${uploadPct}%`, height: "100%", background: "#84cc16" }} />
+                    <div style={{ width: `${uploadPct}%`, height: "100%", background: "#00d29d" }} />
                   </div>
                 </div>
               ) : uploadedFile ? (
                 <div>
-                  <span style={{ color: "#84cc16", fontWeight: "700" }}>✓ {uploadedFile.filename}</span>
+                  <span style={{ color: "#00d29d", fontWeight: "700" }}>✓ {uploadedFile.filename}</span>
                   <span style={{ color: "#94a3b8", fontSize: "0.8rem", marginLeft: "0.5rem" }}>
                     ({(uploadedFile.size / 1024 / 1024).toFixed(1)} MB) — Click to change
                   </span>
@@ -436,7 +436,7 @@ export default function OneClickAI() {
             width: "100%",
             padding: "0.9rem",
             borderRadius: "8px",
-            background: isGenerating ? "#475569" : "var(--accent, #84cc16)",
+            background: isGenerating ? "#475569" : "var(--accent, #00d29d)",
             color: isGenerating ? "#94a3b8" : "#0f172a",
             fontWeight: "700",
             fontSize: "1rem",
@@ -457,7 +457,7 @@ export default function OneClickAI() {
               <span>{pct}%</span>
             </div>
             <div style={{ width: "100%", height: "8px", background: "#0f172a", borderRadius: "4px", overflow: "hidden" }}>
-              <div style={{ width: `${pct}%`, height: "100%", background: "#84cc16", transition: "width 0.3s ease" }} />
+              <div style={{ width: `${pct}%`, height: "100%", background: "#00d29d", transition: "width 0.3s ease" }} />
             </div>
           </div>
         )}
@@ -570,7 +570,7 @@ export default function OneClickAI() {
             {uploadSuccess ? (
               <div style={{ textAlign: "center", padding: "1.5rem 0" }}>
                 <div style={{ fontSize: "3rem", marginBottom: "0.5rem" }}>🎉</div>
-                <h3 style={{ fontSize: "1.2rem", fontWeight: "700", color: "#84cc16", marginBottom: "0.5rem" }}>
+                <h3 style={{ fontSize: "1.2rem", fontWeight: "700", color: "#00d29d", marginBottom: "0.5rem" }}>
                   Published to YouTube!
                 </h3>
                 <p style={{ color: "#cbd5e1", fontSize: "0.9rem", marginBottom: "1.5rem" }}>"{uploadSuccess.title}"</p>
@@ -618,7 +618,7 @@ export default function OneClickAI() {
                     <div style={{ marginTop: "0.4rem", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
                       <span style={{ fontSize: "0.72rem", color: "#94a3b8" }}>AI Suggestions:</span>
                       {aiTitles.map((t, i) => (
-                        <button key={i} type="button" onClick={() => setPublishTitle(t)} style={{ padding: "0.3rem 0.5rem", borderRadius: "4px", background: publishTitle === t ? "#84cc16" : "#334155", color: publishTitle === t ? "#0f172a" : "#e2e8f0", border: "none", cursor: "pointer", fontSize: "0.75rem", textAlign: "left" }}>
+                        <button key={i} type="button" onClick={() => setPublishTitle(t)} style={{ padding: "0.3rem 0.5rem", borderRadius: "4px", background: publishTitle === t ? "#00d29d" : "#334155", color: publishTitle === t ? "#0f172a" : "#e2e8f0", border: "none", cursor: "pointer", fontSize: "0.75rem", textAlign: "left" }}>
                           {i + 1}. {t}
                         </button>
                       ))}

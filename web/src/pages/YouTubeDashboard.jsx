@@ -92,7 +92,7 @@ export default function YouTubeDashboard() {
         </div>
 
         <div style={{ width: "100%", height: "10px", background: "#0f172a", borderRadius: "5px", overflow: "hidden", marginBottom: "1rem" }}>
-          <div style={{ width: `${pct}%`, height: "100%", background: pct > 80 ? "#ef4444" : "#84cc16", transition: "width 0.3s ease" }} />
+          <div style={{ width: `${pct}%`, height: "100%", background: pct > 80 ? "#ef4444" : "#00d29d", transition: "width 0.3s ease" }} />
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1rem", textAlign: "center" }}>
@@ -102,7 +102,7 @@ export default function YouTubeDashboard() {
           </div>
           <div style={{ padding: "0.75rem", background: "#0f172a", borderRadius: "8px" }}>
             <div style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Remaining Uploads Today</div>
-            <div style={{ fontSize: "1.1rem", fontWeight: "700", color: "#84cc16" }}>~{remainingUploads}</div>
+            <div style={{ fontSize: "1.1rem", fontWeight: "700", color: "#00d29d" }}>~{remainingUploads}</div>
           </div>
           <div style={{ padding: "0.75rem", background: "#0f172a", borderRadius: "8px" }}>
             <div style={{ fontSize: "0.75rem", color: "#94a3b8" }}>Upload Cost</div>

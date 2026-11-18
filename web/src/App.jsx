@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "./api.js";
 import { Icons } from "./components/Icons.jsx";
+import logoImg from "./assets/logo.jpg";
 import Create from "./pages/Create.jsx";
 import Library from "./pages/Library.jsx";
 import Settings from "./pages/Settings.jsx";
@@ -20,13 +21,13 @@ const NAV = [
 ];
 
 const TITLES = {
-  oneclick: { h: "One-Click AI", sub: "Mode A: Instant hook discovery, auto-reframing & clipping" },
-  create: { h: "Create clips", sub: "7-step manual studio for custom captions, fonts & timing" },
-  agent: { h: "Auto Agent", sub: "Mode B: Autonomous YouTube channel watcher & watched-folder matcher" },
-  queue: { h: "Publishing Queue", sub: "Review AI scores, fine-tune titles & approve YouTube uploads" },
-  channels: { h: "YouTube Channels", sub: "Google OAuth 2.0 connection & daily API quota telemetry" },
-  library: { h: "Library", sub: "Every clip you've generated" },
-  settings: { h: "Settings", sub: "Compute device & environment" },
+  oneclick: { h: "One-Click AI Studio", sub: "Autonomous hook discovery, smart reframing & instant Shorts generation" },
+  create: { h: "Manual Wizard", sub: "7-step precision editor for custom captions, kinetic typography & reframing" },
+  agent: { h: "Auto Agent", sub: "Autonomous channel monitor & local watched-directory sync" },
+  queue: { h: "Publishing Queue", sub: "Review AI scores, refine viral metadata & publish directly to YouTube" },
+  channels: { h: "YouTube Channels", sub: "Google OAuth 2.0 authorization & real-time quota telemetry" },
+  library: { h: "Media Library", sub: "All generated short-form clips & long-form exports" },
+  settings: { h: "Application Settings", sub: "Hardware compute preferences, AI models & environment configuration" },
 };
 
 const THEMES = [
@@ -43,8 +44,11 @@ function ModelSplash({ status }) {
   const failed = status.status === "error";
   return (
     <div className="model-splash">
-      <div className="model-splash-mark"><Icons.bolt /></div>
-      <div className="model-splash-title">ClipForge</div>
+      <div className="model-splash-mark">
+        <img src={logoImg} alt="Tech Hub" />
+      </div>
+      <div className="model-splash-title">Tech Hub</div>
+      <div className="model-splash-by">Created by Barakah Tech</div>
       {failed ? (
         <>
           <div className="model-splash-msg" style={{ color: "var(--danger)" }}>Could not start the AI engine.</div>
@@ -53,7 +57,7 @@ function ModelSplash({ status }) {
         </>
       ) : (
         <>
-          <div className="model-splash-msg">{status.message || "Starting up…"}</div>
+          <div className="model-splash-msg">{status.message || "Initializing AI engine…"}</div>
           <div className="track model-splash-track">
             <div className={"fill" + (pct == null ? " indeterminate" : "")} style={pct == null ? {} : { width: pct + "%" }} />
           </div>
@@ -152,8 +156,11 @@ export default function App() {
 
       <aside className="sidebar">
         <div className="brand">
-          <span className="logo"><Icons.bolt /></span>
-          <span className="brand-text">ClipForge<span className="brand-by">by Haris AI</span></span>
+          <img src={logoImg} alt="Tech Hub" className="brand-logo-img" />
+          <span className="brand-text">
+            Tech Hub
+            <span className="brand-by">Created by Barakah Tech</span>
+          </span>
         </div>
         <nav className="nav">
           {NAV.map((n) => (
@@ -167,7 +174,9 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          100% local pipeline<br />yt-dlp · faster-whisper · ffmpeg
+          <div style={{ fontWeight: 700, color: "var(--text)", marginBottom: 2 }}>Tech Hub Studio</div>
+          <div style={{ fontSize: "10.5px", color: "var(--accent)", marginBottom: 6 }}>Created by Barakah Tech</div>
+          100% local AI pipeline<br />yt-dlp · faster-whisper · ffmpeg
         </div>
       </aside>
 

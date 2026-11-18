@@ -77,7 +77,7 @@ export const api = {
       xhr.send(fd);
     }),
 
-  // ClipForge v2.0 API additions
+  // Tech Hub v2.0 API additions
   getOAuthUrl: () => jget("/api/v2/oauth/url"),
   youtubeChannels: () => jget("/api/v2/youtube/channels"),
   youtubeQuota: () => jget("/api/v2/youtube/quota"),

@@ -43,7 +43,7 @@ export default function Library() {
       </div>
 
       {totalClips === 0 ? (
-        <div className="empty">No clips yet — head to <b>Create</b> and generate your first short.</div>
+        <div className="empty">No clips yet — head to <b>One-Click AI</b> or <b>Manual Wizard</b> to generate your first short.</div>
       ) : (
         <div className="clips">
           {allClips.map((c) => (

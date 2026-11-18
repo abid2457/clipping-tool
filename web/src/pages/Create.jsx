@@ -63,7 +63,7 @@ export default function Create({ step, setStep }) {
   const [musicSuggest, setMusicSuggest] = useState(null);
 
   // Signature / watermark
-  const [signature, setSignature] = useState({ enabled: false, text: "@theharis.ai", pos_x: 50, pos_y: 92, size: 34, color: "#FFFFFF", opacity: 75 });
+  const [signature, setSignature] = useState({ enabled: false, text: "@TechHub", pos_x: 50, pos_y: 92, size: 34, color: "#FFFFFF", opacity: 75 });
   const setSig = (k, v) => setSignature((s) => ({ ...s, [k]: v }));
 
   // Generate

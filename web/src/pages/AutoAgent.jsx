@@ -184,7 +184,7 @@ export default function AutoAgent() {
               width: "100%",
               padding: "0.75rem",
               borderRadius: "8px",
-              background: "var(--accent, #84cc16)",
+              background: "var(--accent, #00d29d)",
               color: "#0f172a",
               fontWeight: "700",
               border: "none",
