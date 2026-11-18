@@ -28,7 +28,9 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 # Browsers we'll borrow cookies from (in order) when YouTube throws up a
 # sign-in / "confirm you're not a bot" wall. Override with env vars below.
-_DEFAULT_BROWSERS = ["chrome", "edge", "brave", "firefox", "opera", "vivaldi"]
+# Edge is first because Chrome is often running (user browses Tech Hub in it)
+# and Windows locks the cookie DB while the browser is open.
+_DEFAULT_BROWSERS = ["edge", "brave", "chrome", "firefox", "opera", "vivaldi"]
 _COOKIE_FILE_ENV = "CLIPFORGE_COOKIES_FILE"       # path to a cookies.txt
 _COOKIE_BROWSER_ENV = "CLIPFORGE_COOKIES_BROWSER"  # force one browser, e.g. "chrome"
 
@@ -42,12 +44,38 @@ _BROWSER_PATHS: dict[str, list[Path]] = {
     "vivaldi": [Path(os.environ.get("LOCALAPPDATA", ".")) / "Vivaldi" / "User Data"],
 }
 
+# Process names to detect which browser is currently running (cookie DB locked).
+_BROWSER_PROCESS_NAMES: dict[str, list[str]] = {
+    "chrome": ["chrome.exe"],
+    "edge":   ["msedge.exe"],
+    "brave":  ["brave.exe"],
+    "firefox": ["firefox.exe"],
+    "opera":  ["opera.exe"],
+    "vivaldi": ["vivaldi.exe"],
+}
+
 
 def _browser_installed(name: str) -> bool:
     """Return True only if the browser's profile directory actually exists."""
     for p in _BROWSER_PATHS.get(name, []):
         if p.exists():
             return True
+    return False
+
+
+def _browser_running(name: str) -> bool:
+    """Check if a browser process is currently running (cookie DB likely locked)."""
+    import subprocess
+    for proc_name in _BROWSER_PROCESS_NAMES.get(name, []):
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {proc_name}", "/NH"],
+                capture_output=True, text=True, timeout=3
+            )
+            if proc_name.lower() in result.stdout.lower():
+                return True
+        except Exception:
+            pass
     return False
 
 
@@ -87,7 +115,9 @@ def _download_attempts(base_opts: dict) -> list[tuple[str, dict]]:
       1. explicit cookies (only if the user configured a file/browser),
       2. the plain default pass (fast for public videos),
       3. cookie-free alternate YouTube player clients (dodge the bot wall),
-      4. browser cookies (only browsers that are actually installed) as last resort.
+      4. browser cookies — non-running browsers first, then running ones as
+         a last resort (on Windows the cookie DB is locked while the browser
+         is open, so non-running browsers are far more likely to succeed).
     """
     cookie_file = os.environ.get(_COOKIE_FILE_ENV)
     forced = os.environ.get(_COOKIE_BROWSER_ENV)
@@ -108,11 +138,24 @@ def _download_attempts(base_opts: dict) -> list[tuple[str, dict]]:
         ))
 
     if not forced:  # auto-try common browsers unless the user pinned one
+        # Split into idle (not running) and busy (running) browsers.
+        # Try idle ones first — their cookie DBs aren't locked.
+        idle_browsers = []
+        busy_browsers = []
         for b in _DEFAULT_BROWSERS:
-            if _browser_installed(b):
-                attempts.append((f"{b} cookies", {**base_opts, "cookiesfrombrowser": (b,)}))
-            else:
+            if not _browser_installed(b):
                 logger.debug("Skipping %s cookies — not installed", b)
+                continue
+            if _browser_running(b):
+                logger.info("Browser %s is running (cookie DB may be locked) — will try last", b)
+                busy_browsers.append(b)
+            else:
+                idle_browsers.append(b)
+
+        for b in idle_browsers:
+            attempts.append((f"{b} cookies (idle)", {**base_opts, "cookiesfrombrowser": (b,)}))
+        for b in busy_browsers:
+            attempts.append((f"{b} cookies (running)", {**base_opts, "cookiesfrombrowser": (b,)}))
 
     return attempts
 
@@ -204,14 +247,19 @@ def download_video(
             msg += f"\nReason: {last_reason}"
         if _needs_cookies(last_reason):
             installed = [b for b in _DEFAULT_BROWSERS if _browser_installed(b)]
-            browser_hint = installed[0] if installed else "chrome"
+            idle = [b for b in installed if not _browser_running(b)]
+            running = [b for b in installed if _browser_running(b)]
+            if idle:
+                hint = f"Non-running browsers tried: {', '.join(idle)}."
+            elif running:
+                hint = (f"All installed browsers ({', '.join(running)}) are currently running "
+                        f"and their cookie databases are locked. Close one of them and retry.")
+            else:
+                hint = "No supported browsers found."
             msg += (
-                f"\n\nThis video is behind YouTube's sign-in / bot check. "
-                f"Try closing {browser_hint.title()} completely (all windows), then retry. "
-                f"On Windows, the browser's cookie database is locked while it's running. "
-                f"\n\nInstalled browsers detected: {', '.join(installed) if installed else 'none'}. "
-                f"To pin a specific browser, set CLIPFORGE_COOKIES_BROWSER={browser_hint} "
-                f"or point CLIPFORGE_COOKIES_FILE at a cookies.txt."
+                f"\n\nThis video requires YouTube authentication. {hint}"
+                f"\n\nTip: If you're browsing Tech Hub in Chrome, try logging into YouTube "
+                f"in Edge, then close Edge and retry — Tech Hub will use Edge's cookies."
             )
         raise InvalidVideoURLError(msg) from last_exc
 
